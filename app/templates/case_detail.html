@@ -3,12 +3,7 @@
 <h2>Case {{ case.case_number }}</h2>
 <a class="btn" href="/cases/{{ case.id }}/report" target="_blank"
    style="font-size:0.85em; padding:0.4em 0.7em;">
-  📄 PDF Report
-</a>
-
-<a class="btn" href="/cases/{{ case.id }}/deal-pdf" target="_blank"
-   style="font-size:0.85em; padding:0.4em 0.7em; margin-left:0.5rem;">
-  💰 Deal Calculator PDF
+  Deal Calculator
 </a>
 
 <!-- Two-column wrapper ONLY for address/photo (left) and Outstanding Liens (right) -->
@@ -105,7 +100,7 @@
       <input type="number" step="0.01" name="rehab" value="{{ case.rehab or 0 }}">
       <label>Closing Costs</label>
       <input type="number" step="0.01" name="closing_costs" value="{{ case.closing_costs or 0 }}">
-      <p><strong>JSN Max Cash Offer:</strong> {{ offer_70 | currency }}</p>
+      <p><strong>JSN Max Offer:</strong> {{ offer_70 | currency }}</p>
       <button class="btn" type="submit">Save</button>
     </form>
   </section>

@@ -43,7 +43,7 @@ from fastapi.templating import Jinja2Templates
 
 # ---------------- DB / ORM ----------------
 from sqlalchemy.orm import Session
-from sqlalchemy import inspect, text, bindparam, func  # add text, bindparam, func
+from sqlalchemy import inspect, text, bindparam  # add text, bindparam
 from sqlalchemy.exc import OperationalError
 
 # ---------------- App imports ----------------
@@ -166,45 +166,14 @@ def ensure_sqlite_columns():
                 conn.exec_driver_sql(
                     "ALTER TABLE cases ADD COLUMN previous_deed_path TEXT DEFAULT ''"
                 )
-            # Outstanding liens column (JSON stored as TEXT)
+            # NEW: Outstanding liens column (JSON stored as TEXT)
             if "outstanding_liens" not in cols:
                 conn.exec_driver_sql(
                     "ALTER TABLE cases ADD COLUMN outstanding_liens TEXT DEFAULT '[]'"
                 )
-            # Parsed mortgage helper columns
-            if "mortgage_amount" not in cols:
-                conn.exec_driver_sql(
-                    "ALTER TABLE cases ADD COLUMN mortgage_amount REAL DEFAULT 0"
-                )
-            if "mortgage_lender" not in cols:
-                conn.exec_driver_sql(
-                    "ALTER TABLE cases ADD COLUMN mortgage_lender TEXT DEFAULT ''"
-                )
-            if "mortgage_borrower" not in cols:
-                conn.exec_driver_sql(
-                    "ALTER TABLE cases ADD COLUMN mortgage_borrower TEXT DEFAULT ''"
-                )
-            if "mortgage_date" not in cols:
-                conn.exec_driver_sql(
-                    "ALTER TABLE cases ADD COLUMN mortgage_date TEXT DEFAULT ''"
-                )
-            if "mortgage_recording_date" not in cols:
-                conn.exec_driver_sql(
-                    "ALTER TABLE cases ADD COLUMN mortgage_recording_date TEXT DEFAULT ''"
-                )
-            if "mortgage_instrument" not in cols:
-                conn.exec_driver_sql(
-                    "ALTER TABLE cases ADD COLUMN mortgage_instrument TEXT DEFAULT ''"
-                )
-            # Ensure archived column exists as INTEGER
-            if "archived" not in cols:
-                conn.exec_driver_sql(
-                    "ALTER TABLE cases ADD COLUMN archived INTEGER DEFAULT 0"
-                )
     except OperationalError:
         # first run or non-sqlite; ignore
         pass
-
 
 # ======================================================================
 # Helpers: shell runner + scraper glue
@@ -247,28 +216,6 @@ def _find_scraper_script() -> Path:
         ),
     )
 
-def _find_pinellas_scraper_script() -> Path:
-    """
-    Locate `pinellas_lis_pendens.py` in either:
-    - <root>/app/integrations/pinellas_scraper
-    - <root>/app/scrapers
-    """
-    candidates = [
-        BASE_DIR / "app" / "integrations" / "pinellas_scraper" / "pinellas_lis_pendens.py",
-        BASE_DIR / "app" / "scrapers" / "pinellas_lis_pendens.py",
-    ]
-    for p in candidates:
-        if p.exists():
-            return p
-
-    # Don't blow up the whole job; the caller can catch this and just log a warning
-    raise HTTPException(
-        status_code=500,
-        detail=(
-            "Pinellas scraper script not found. Place 'pinellas_lis_pendens.py' in "
-            "'app/integrations/pinellas_scraper/' or 'app/scrapers/'."
-        ),
-    )
 
 def _import_csv_into_db(db: Session, csv_path: str) -> tuple[int, int, int]:
     """
@@ -465,6 +412,36 @@ def case_detail(request: Request, case_id: int, db: Session = Depends(get_db)):
         case = db.query(Case).get(case_id)  # type: ignore[call-arg]
 
     if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    # Clean up defendants list (hide blank / nan / nil)
+    try:
+        raw_defs = list(getattr(case, "defendants", []) or [])
+        cleaned_defs = []
+        for d in raw_defs:
+            name = (getattr(d, "name", "") or "").strip()
+            if not name:
+                continue
+            lower = name.lower()
+            if lower in {"nan", "none", "nil"}:
+                continue
+            cleaned_defs.append(d)
+        try:
+            setattr(case, "defendants", cleaned_defs)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    return templates.TemplateResponse(
+        "case_detail.html",
+        {
+            "request": request,
+            "case": case,
+        },
+    )
+
+    if not case:
         return RedirectResponse(url="/cases", status_code=303)
 
     # fetch notes explicitly and attach so Jinja can access `case.notes`
@@ -583,134 +560,60 @@ def update_case_list_page(request: Request):
 async def update_cases(
     request: Request,
     since_days: int = Form(7),
-    county_scope: str = Form("pasco"),
 ):
     """
     Starts an async job that:
-      1) Runs one or both scrapers (Pasco / Pinellas) with --since-days
-      2) Imports the Pasco CSV into the DB (Pinellas currently writes CSV only)
+      1) Runs the foreclosure scraper with --since-days
+      2) Imports the resulting CSV with upsert-by-case_number (no dupes)
     Immediately redirects to a live log page.
     """
-    # Normalize county scope
-    county_scope = (county_scope or "pasco").strip().lower()
-    if county_scope not in {"pasco", "pinellas", "both"}:
-        county_scope = "pasco"
-
     job_id = uuid.uuid4().hex
-    await progress_bus.publish(job_id, f"Queued job {job_id} (county_scope={county_scope})…")
-
-    asyncio.create_task(_update_cases_job(job_id, since_days, county_scope))
+    # prime the log so the progress page shows something immediately
+    await progress_bus.publish(job_id, f"Queued job {job_id}…")
+    asyncio.create_task(_update_cases_job(job_id, since_days))
     return RedirectResponse(url=f"/update_progress/{job_id}", status_code=303)
 
 
-
-async def _update_cases_job(job_id: str, since_days: int, county_scope: str = "pasco"):
-    """
-    Background job that can:
-      - Run the Pasco scraper and import into the DB
-      - Run the Pinellas scraper and write a CSV
-      - Or both, depending on county_scope
-    """
+async def _update_cases_job(job_id: str, since_days: int):
     try:
-        county_scope = (county_scope or "pasco").strip().lower()
-        await progress_bus.publish(
-            job_id,
-            f"Starting update job {job_id} (since_days={since_days}, county_scope={county_scope})",
-        )
+        await progress_bus.publish(job_id, f"Starting update job {job_id} (since_days={since_days})")
 
-        # -----------------------
-        # 1) Pasco
-        # -----------------------
-        if county_scope in {"pasco", "both"}:
-            await progress_bus.publish(job_id, "[pasco] Locating pasco scraper script…")
-            scraper_script = _find_scraper_script()
-            tmpdir = tempfile.mkdtemp(prefix="pasco_update_")
-            csv_out = os.path.join(tmpdir, "pasco_foreclosures.csv")
+        # 1) Run the scraper to produce CSV
+        scraper_script = _find_scraper_script()
+        tmpdir = tempfile.mkdtemp(prefix="pasco_update_")
+        csv_out = os.path.join(tmpdir, "pasco_foreclosures.csv")
 
-            cmd = [
-                sys.executable,
-                str(scraper_script),
-                "--since-days",
-                str(max(0, int(since_days))),
-                "--out",
-                csv_out,
-            ]
-            await progress_bus.publish(job_id, "[pasco] Launching scraper: " + " ".join(cmd))
-            rc = await run_command_with_logs(cmd, job_id)
+        cmd = [
+            sys.executable,
+            str(scraper_script),
+            "--since-days", str(max(0, int(since_days))),
+            "--out", csv_out,  # your integrated scraper should accept --out
+        ]
+        await progress_bus.publish(job_id, "Launching scraper: " + " ".join(cmd))
+        rc = await run_command_with_logs(cmd, job_id)
+        if rc != 0 or not os.path.exists(csv_out):
+            await progress_bus.publish(job_id, "[error] Scraper failed or CSV not found.]")
+            await progress_bus.publish(job_id, "[done] exit_code=1")
+            return
 
-            if rc != 0 or not os.path.exists(csv_out):
-                await progress_bus.publish(
-                    job_id,
-                    "[pasco][error] Scraper failed or CSV not found.",
-                )
-                # For now, if Pasco fails and you requested Pasco or Both, bail out.
-                if county_scope in {"pasco", "both"}:
-                    await progress_bus.publish(job_id, "[done] exit_code=1")
-                    return
+        await progress_bus.publish(job_id, "Scraper finished. Importing CSV via tools/import_pasco_csv.py…")
 
-            await progress_bus.publish(
-                job_id,
-                "[pasco] Scraper finished. Importing CSV via tools/import_pasco_csv.py…",
-            )
+        # 2) Import CSV using the same logic as the CLI tool
+        def _run_import():
+            # This is the same thing you just ran manually:
+            # python tools/import_pasco_csv.py "C:\...\pasco_foreclosures.csv"
+            import_pasco_csv_main(csv_out)
 
-            # Import CSV using the same logic as the CLI tool
-            def _run_import():
-                import_pasco_csv_main(csv_out)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _run_import)
 
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _run_import)
-            await progress_bus.publish(job_id, "[pasco] Import complete via tools/import_pasco_csv.py")
-
-        # -----------------------
-        # 2) Pinellas
-        # -----------------------
-        if county_scope in {"pinellas", "both"}:
-            await progress_bus.publish(job_id, "[pinellas] Locating pinellas scraper script…")
-            try:
-                pinellas_script = _find_pinellas_scraper_script()
-            except HTTPException as e:
-                # Just log the problem instead of killing the whole job
-                await progress_bus.publish(
-                    job_id,
-                    f"[pinellas][warning] {e.detail}",
-                )
-            else:
-                # Write directly into the /data folder so you can inspect the CSV easily
-                out_path = BASE_DIR / "data" / "pinellas_lis_pendens.csv"
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-
-                cmd = [
-                    sys.executable,
-                    str(pinellas_script),
-                    "--since-days",
-                    str(max(0, int(since_days))),
-                    "--out",
-                    str(out_path),
-                ]
-                await progress_bus.publish(job_id, "[pinellas] Launching scraper: " + " ".join(cmd))
-                rc = await run_command_with_logs(cmd, job_id)
-
-                if rc != 0:
-                    await progress_bus.publish(
-                        job_id,
-                        "[pinellas][error] Scraper process exited with non-zero code.",
-                    )
-                else:
-                    await progress_bus.publish(
-                        job_id,
-                        f"[pinellas] Scrape finished. CSV saved to: {out_path}",
-                    )
-                    await progress_bus.publish(
-                        job_id,
-                        "[pinellas] (Importer not yet wired; review CSV then we can add DB import.)",
-                    )
-
+        await progress_bus.publish(job_id, "Import complete via tools/import_pasco_csv.py")
         await progress_bus.publish(job_id, "[done] exit_code=0")
 
     except Exception as e:
+        # Surface the exception in the log and signal completion
         await progress_bus.publish(job_id, f"[exception] {e}")
         await progress_bus.publish(job_id, "[done] exit_code=1")
-
 # ======================================================================
 # PDF Report for a Case (summary + attached documents)
 # ======================================================================
@@ -761,76 +664,123 @@ def case_report(case_id: int, db: Session = Depends(get_db)):
     line(f"Parcel ID: {case.parcel_id or ''}")
     addr = (getattr(case, 'address_override', None) or getattr(case, 'address', '') or '').strip()
     line(f"Address: {addr}")
-
-    # Financials / Deal snapshot
+    # Financials
     y -= 10
-    line("Financials / Deal Snapshot:", bold=True)
+    line("Financials:", bold=True)
+    arv_val = getattr(case, "arv", "") or ""
+    rehab_val = getattr(case, "rehab", "") or ""
+    closing_val = getattr(case, "closing_costs", "") or ""
 
-    arv_val = getattr(case, "arv", 0) or 0
-    rehab_val = getattr(case, "rehab", 0) or 0
-    closing_val = getattr(case, "closing_costs", 0) or 0
+    def _fmt_money(raw) -> str:
+        # Accept str, int, float, or None and return a currency-formatted string when possible
+        if raw is None:
+            return ""
+        # If it's already a number, format directly
+        if isinstance(raw, (int, float)):
+            try:
+                return f"${float(raw):,.2f}"
+            except Exception:
+                return str(raw)
+        raw_str = str(raw).strip()
+        if not raw_str:
+            return ""
+        cleaned = raw_str.replace("$", "").replace(",", "")
+        try:
+            val = float(cleaned)
+            return f"${val:,.2f}"
+        except Exception:
+            # fall back to original string if not parseable
+            return raw_str
+
+    line(f"ARV: {_fmt_money(arv_val)}")
+    line(f"Rehab: {_fmt_money(rehab_val)}")
+    line(f"Closing Costs: {_fmt_money(closing_val)}")
+
+    # JSN deal calculator
+    try:
+        if isinstance(arv_val, (int, float)):
+            arv_num = float(arv_val)
+        else:
+            arv_num = float((str(arv_val) or "").replace("$", "").replace(",", "") or 0)
+    except Exception:
+        arv_num = 0.0
+    try:
+        if isinstance(rehab_val, (int, float)):
+            rehab_num = float(rehab_val)
+        else:
+            rehab_num = float((str(rehab_val) or "").replace("$", "").replace(",", "") or 0)
+    except Exception:
+        rehab_num = 0.0
+    try:
+        if isinstance(closing_val, (int, float)):
+            closing_num = float(closing_val)
+        else:
+            closing_num = float((str(closing_val) or "").replace("$", "").replace(",", "") or 0)
+    except Exception:
+        closing_num = 0.0
 
     try:
-        arv_val_f = float(arv_val)
+        from app.utils import compute_offer_70
     except Exception:
-        arv_val_f = 0.0
-    try:
-        rehab_val_f = float(rehab_val)
-    except Exception:
-        rehab_val_f = 0.0
-    try:
-        closing_val_f = float(closing_val)
-    except Exception:
-        closing_val_f = 0.0
+        # Fallback: simple 70% ARV minus costs if helper missing
+        def compute_offer_70(arv, rehab, closing):
+            return max(0.0, 0.7 * (arv or 0.0) - (rehab or 0.0) - (closing or 0.0))
 
-    offer_70 = compute_offer_70(arv_val_f, rehab_val_f, closing_val_f)
+    offer_70 = compute_offer_70(arv_num, rehab_num, closing_num)
+    try:
+        offer_display = f"{offer_70:,.2f}"
+    except Exception:
+        offer_display = str(offer_70)
+    line(f"JSN Max Offer: ${offer_display}")
 
-    # Sum outstanding liens (if any) as numbers
+    # Max Seller in Hand Cash (JSN Max Offer - sum of all liens)
+    total_liens_for_calc = 0.0
     liens_raw_for_calc = getattr(case, "outstanding_liens", "[]") or "[]"
     try:
         liens_for_calc = json.loads(liens_raw_for_calc)
     except Exception:
         liens_for_calc = []
-
-    liens_total = 0.0
     if isinstance(liens_for_calc, list):
         for l in liens_for_calc:
-            amt = None
             if isinstance(l, dict):
-                amt = l.get("amount")
+                amt_raw2 = (l.get("amount") or "").strip()
             else:
-                amt = l
-            if amt is None:
+                amt_raw2 = ""
+            if not amt_raw2:
                 continue
+            cleaned2 = amt_raw2.replace("$", "").replace(",", "")
             try:
-                import re as _re
-                s = _re.sub(r"[^0-9.]+", "", str(amt))
-                if s:
-                    liens_total += float(s)
+                total_liens_for_calc += float(cleaned2)
             except Exception:
                 continue
-
-    est_equity = max(0.0, arv_val_f - liens_total)
-    max_wholesale_offer = max(0.0, offer_70 - liens_total)
-
-    line(f"ARV: ${arv_val_f:,.0f}")
-    line(f"Rehab: ${rehab_val_f:,.0f}")
-    line(f"Closing Costs: ${closing_val_f:,.0f}")
-    line(f"70% Offer (ARV - Rehab - Closing): ${offer_70:,.0f}")
-    line(f"Total Outstanding Liens: ${liens_total:,.0f}")
-    line(f"Estimated Equity (ARV - Liens): ${est_equity:,.0f}")
-    line(f"Suggested Max Wholesale Offer: ${max_wholesale_offer:,.0f}")
+    try:
+        seller_cash = max(0.0, float(offer_70) - float(total_liens_for_calc))
+    except Exception:
+        seller_cash = 0.0
+    try:
+        seller_display = f"{seller_cash:,.2f}"
+    except Exception:
+        seller_display = str(seller_cash)
+    line(f"Max Seller in Hand Cash: ${seller_display}")
 
     # Defendants
     y -= 10
     line("Defendants:", bold=True)
     defendants = getattr(case, "defendants", []) or []
-    if defendants:
-        for d in defendants:
-            line(f" - {getattr(d, 'name', '')}")
+    clean_defendants = []
+    for d in defendants:
+        name = (getattr(d, "name", "") or "").strip()
+        if not name:
+            continue
+        lower = name.lower()
+        if lower in {"nan", "none", "nil"}:
+            continue
+        clean_defendants.append(name)
+    if clean_defendants:
+        for name in clean_defendants:
+            line(f" - {name}")
     else:
         line(" - None recorded")
-
     # Outstanding Liens (if present)
     y -= 10
     line("Outstanding Liens:", bold=True)
@@ -839,21 +789,99 @@ def case_report(case_id: int, db: Session = Depends(get_db)):
         liens = json.loads(liens_raw)
     except Exception:
         liens = []
+    total_liens = 0.0
     if isinstance(liens, list) and liens:
-        for l in liens:
-            desc = l.get("description") if isinstance(l, dict) else str(l)
-            amt = l.get("amount") if isinstance(l, dict) else ""
-            line(f" - {desc} {f'(${amt})' if amt else ''}")
+        for idx, l in enumerate(liens):
+            if isinstance(l, dict):
+                desc = (l.get("description") or "").strip()
+                amt_raw = (l.get("amount") or "").strip()
+            else:
+                desc = str(l).strip()
+                amt_raw = ""
+
+            # Default description for first lien when missing → assume foreclosing mortgage
+            if not desc:
+                if idx == 0:
+                    desc = "Foreclosing Mortgage"
+                else:
+                    desc = "Lien"
+
+            # Normalize amount formatting
+            amt_str = ""
+            if amt_raw:
+                cleaned = amt_raw.replace("$", "").replace(",", "")
+                try:
+                    total_liens += float(cleaned)
+                except Exception:
+                    pass
+                # Pretty print
+                try:
+                    amt_val = float(cleaned)
+                    amt_str = f"${amt_val:,.2f}"
+                except Exception:
+                    amt_str = f"${cleaned}"
+
+            if amt_str:
+                line(f" - {desc} - {amt_str}")
+            else:
+                line(f" - {desc}")
     else:
         line(" - None recorded")
 
-    # Notes summary (just show count)
+    # Mortgage information (summarized from Mortgage PDF text if possible)
+    mortgage_info = "Not uploaded"
+    mort_rel = getattr(case, "mortgage_path", None)
+    if mort_rel:
+        try:
+            mort_path = UPLOAD_ROOT / mort_rel
+            if mort_path.exists():
+                try:
+                    r = PdfReader(str(mort_path))
+                except Exception:
+                    r = None
+                if r is not None:
+                    text_chunks = []
+                    # read first 2 pages to keep it light
+                    for page in r.pages[:2]:
+                        try:
+                            t = page.extract_text() or ""
+                        except Exception:
+                            t = ""
+                        if t:
+                            text_chunks.append(t)
+                    full_text = " ".join(text_chunks)
+                    full_text_norm = " ".join(full_text.split())
+                    if full_text_norm:
+                        snippet = full_text_norm[:200]
+                        if len(full_text_norm) > 200:
+                            snippet += "..."
+                        mortgage_info = snippet
+                    else:
+                        mortgage_info = "Uploaded (no extractable text found)"
+            else:
+                mortgage_info = "Uploaded (file not found on disk)"
+        except Exception:
+            mortgage_info = "Uploaded (error reading file)"
+
+    line(f"Mortgage Info: {mortgage_info}")
+
+    # Notes summary (list recent notes)
     notes = getattr(case, "notes", None)
     if notes is None:
         # lazily load notes if not attached
         notes = db.query(Note).filter(Note.case_id == case_id).order_by(Note.id.desc()).all()
     y -= 10
-    line(f"Notes Count: {len(notes) if notes else 0}", bold=True)
+    line("Notes:", bold=True)
+    if notes:
+        for n in notes:
+            content = (getattr(n, "content", "") or "").strip()
+            if not content:
+                continue
+            if len(content) > 160:
+                content = content[:157] + "..."
+            line(f" - {content}")
+    else:
+        line(" - None recorded")
 
     # Attached documents list
     y -= 10
@@ -917,232 +945,6 @@ def case_report(case_id: int, db: Session = Depends(get_db)):
         out_buf,
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-def extract_mortgage_fields_from_pdf(pdf_path: Path) -> dict:
-    """Best-effort extraction of key mortgage fields from a PDF.
-
-    Returns a dict with:
-      mortgage_amount, mortgage_lender, mortgage_borrower,
-      mortgage_date, mortgage_recording_date, mortgage_instrument
-    All values may be None if not detected.
-    """
-    from PyPDF2 import PdfReader as _PdfReader
-    import re as _re
-
-    out = {
-        "mortgage_amount": None,
-        "mortgage_lender": None,
-        "mortgage_borrower": None,
-        "mortgage_date": None,
-        "mortgage_recording_date": None,
-        "mortgage_instrument": None,
-    }
-
-    try:
-        reader = _PdfReader(str(pdf_path))
-    except Exception:
-        return out
-
-    # Concatenate text from first few pages (mortgage docs are usually front-loaded)
-    texts = []
-    try:
-        for i, page in enumerate(reader.pages[:5]):
-            try:
-                t = page.extract_text() or ""
-            except Exception:
-                t = ""
-            texts.append(t)
-    except Exception:
-        pass
-
-    full = "\n".join(texts)
-    if not full.strip():
-        return out
-
-    # Normalize spaces for easier regex
-    norm = " ".join(full.split())
-
-    # --- Amount: pick the largest dollar-looking number ---
-    money_re = _re.compile(r"\$\s*([0-9]{2,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)")
-    amounts = [m.group(1) for m in money_re.finditer(norm)]
-    best_amt = None
-    best_val = 0.0
-    for amt in amounts:
-        try:
-            val = float(amt.replace(",", ""))
-        except ValueError:
-            continue
-        # Heuristic: ignore tiny amounts
-        if val >= best_val and val >= 1000:
-            best_val = val
-            best_amt = val
-    if best_amt is not None:
-        out["mortgage_amount"] = best_amt
-
-    # --- Borrower / Mortgagor ---
-    for label in ("Borrower:", "Mortgagor:", "GRANTOR:"):
-        m = _re.search(label + r"\s*(.+?)(?:,|\n|\r|  )", full, flags=_re.IGNORECASE)
-        if m:
-            out["mortgage_borrower"] = m.group(1).strip()
-            break
-
-    # --- Lender / Mortgagee ---
-    for label in ("Lender:", "Mortgagee:", "GRANTEE:"):
-        m = _re.search(label + r"\s*(.+?)(?:,|\n|\r|  )", full, flags=_re.IGNORECASE)
-        if m:
-            out["mortgage_lender"] = m.group(1).strip()
-            break
-
-    # --- Dates: capture first couple of date-like patterns ---
-    date_re = _re.compile(
-        r"((?:0?[1-9]|1[0-2])[/-](?:0?[1-9]|[12][0-9]|3[01])[/-](?:19|20)\d\d)"
-    )
-    dates = [m.group(1) for m in date_re.finditer(norm)]
-    if dates:
-        out["mortgage_date"] = dates[0]
-        if len(dates) > 1:
-            out["mortgage_recording_date"] = dates[1]
-
-    # --- Instrument / Book & Page ---
-    inst_re = _re.search(
-        r"(Instrument\s+No\.\s*\d+|Book\s+\d+\s*,?\s*Page\s+\d+|OR\s+Book\s+\d+\s+Page\s+\d+)",
-        full,
-        flags=_re.IGNORECASE,
-    )
-    if inst_re:
-        out["mortgage_instrument"] = inst_re.group(1).strip()
-
-    return out
-
-
-
-@app.get("/cases/{case_id}/deal-pdf")
-def case_deal_pdf(case_id: int, db: Session = Depends(get_db)):
-    """Export a single-page Deal Calculator PDF for this case."""
-    getter = getattr(db, "get", None)
-    if callable(getter):
-        case = db.get(Case, case_id)
-    else:
-        case = db.query(Case).get(case_id)  # type: ignore[call-arg]
-
-    if not case:
-        raise HTTPException(status_code=404, detail="Case not found")
-
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=letter)
-    width, height = letter
-
-    y = height - 50
-
-    def line(text: str, dy: int = 18, bold: bool = False):
-        nonlocal y
-        if bold:
-            c.setFont("Helvetica-Bold", 12)
-        else:
-            c.setFont("Helvetica", 11)
-        c.drawString(50, y, text)
-        y -= dy
-
-    # Header
-    c.setTitle(f"Deal Calculator - {case.case_number}")
-    line("JSN Holdings - Deal Calculator", bold=True)
-    y -= 4
-    line(f"Case: {case.case_number}")
-    line(f"Filed: {case.filing_datetime or ''}")
-    addr = (getattr(case, "address_override", None) or getattr(case, "address", "") or "").strip()
-    line(f"Address: {addr}")
-
-    # Numbers
-    y -= 10
-    line("Numbers", bold=True)
-
-    arv_val = getattr(case, "arv", 0) or 0
-    rehab_val = getattr(case, "rehab", 0) or 0
-    closing_val = getattr(case, "closing_costs", 0) or 0
-
-    try:
-        arv_val_f = float(arv_val)
-    except Exception:
-        arv_val_f = 0.0
-    try:
-        rehab_val_f = float(rehab_val)
-    except Exception:
-        rehab_val_f = 0.0
-    try:
-        closing_val_f = float(closing_val)
-    except Exception:
-        closing_val_f = 0.0
-
-    offer_70 = compute_offer_70(arv_val_f, rehab_val_f, closing_val_f)
-
-    liens_raw = getattr(case, "outstanding_liens", "[]") or "[]"
-    try:
-        liens_for_calc = json.loads(liens_raw)
-    except Exception:
-        liens_for_calc = []
-
-    liens_total = 0.0
-    if isinstance(liens_for_calc, list):
-        for l in liens_for_calc:
-            amt = None
-            if isinstance(l, dict):
-                amt = l.get("amount")
-            else:
-                amt = l
-            if amt is None:
-                continue
-            try:
-                import re as _re
-                s = _re.sub(r"[^0-9.]+", "", str(amt))
-                if s:
-                    liens_total += float(s)
-            except Exception:
-                continue
-
-    est_equity = max(0.0, arv_val_f - liens_total)
-    max_wholesale_offer = max(0.0, offer_70 - liens_total)
-
-    line(f"ARV: ${arv_val_f:,.0f}")
-    line(f"Rehab: ${rehab_val_f:,.0f}")
-    line(f"Closing Costs: ${closing_val_f:,.0f}")
-    line(f"70% Offer (ARV - Rehab - Closing): ${offer_70:,.0f}")
-    line(f"Total Outstanding Liens: ${liens_total:,.0f}")
-    line(f"Estimated Equity (ARV - Liens): ${est_equity:,.0f}")
-    line(f"Suggested Max Wholesale Offer: ${max_wholesale_offer:,.0f}")
-
-    # Mortgage details if present
-    y -= 10
-    line("Mortgage (parsed)", bold=True)
-    if getattr(case, "mortgage_amount", 0) or getattr(case, "mortgage_lender", ""):
-        if getattr(case, "mortgage_amount", 0):
-            try:
-                line(f"Original Amount: ${float(case.mortgage_amount):,.0f}")
-            except Exception:
-                line(f"Original Amount: {case.mortgage_amount}")
-        if getattr(case, "mortgage_lender", ""):
-            line(f"Lender: {case.mortgage_lender}")
-        if getattr(case, "mortgage_borrower", ""):
-            line(f"Borrower: {case.mortgage_borrower}")
-        if getattr(case, "mortgage_date", ""):
-            line(f"Mortgage Date: {case.mortgage_date}")
-        if getattr(case, "mortgage_recording_date", ""):
-            line(f"Recording Date: {case.mortgage_recording_date}")
-        if getattr(case, "mortgage_instrument", ""):
-            line(f"Instrument: {case.mortgage_instrument}")
-    else:
-        line("No parsed mortgage details found.")
-
-    c.showPage()
-    c.save()
-
-    buf.seek(0)
-    filename = f"case_{case.id}_deal_calculator.pdf"
-    return StreamingResponse(
-        buf,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
     )
 
 # ======================================================================
@@ -1218,42 +1020,9 @@ async def upload_mortgage(
     dest = Path(folder) / "Mortgage.pdf"
     with open(dest, "wb") as f:
         f.write(await mortgage.read())
-    # Save relative path
     case.mortgage_path = dest.relative_to(UPLOAD_ROOT).as_posix()
-
-    # Try to extract key mortgage fields from the PDF text
-    try:
-        fields = extract_mortgage_fields_from_pdf(dest)
-    except Exception:
-        fields = {}
-
-    if isinstance(fields, dict):
-        amt = fields.get("mortgage_amount")
-        if amt is not None:
-            try:
-                case.mortgage_amount = float(amt)
-            except Exception:
-                pass
-        lender = fields.get("mortgage_lender")
-        if lender:
-            case.mortgage_lender = str(lender)[:255]
-        borrower = fields.get("mortgage_borrower")
-        if borrower:
-            case.mortgage_borrower = str(borrower)[:255]
-        m_date = fields.get("mortgage_date")
-        if m_date:
-            case.mortgage_date = str(m_date)[:50]
-        r_date = fields.get("mortgage_recording_date")
-        if r_date:
-            case.mortgage_recording_date = str(r_date)[:50]
-        inst = fields.get("mortgage_instrument")
-        if inst:
-            case.mortgage_instrument = str(inst)[:255]
-
     db.commit()
     return RedirectResponse(f"/cases/{case_id}", status_code=303)
-
-
 
 
 @app.post("/cases/{case_id}/upload/current-deed")
@@ -1406,14 +1175,6 @@ def cases_list(
     page: int = Query(1),
     show_archived: int = Query(0),
     case: str = Query("", alias="case"),
-    min_arv: Optional[float] = Query(None),
-    max_arv: Optional[float] = Query(None),
-    has_mortgage: int = Query(0),
-    has_current_deed: int = Query(0),
-    has_liens: int = Query(0),
-    has_notes: int = Query(0),
-    filing_from: Optional[str] = Query(None),
-    filing_to: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
     qry = db.query(Case)
@@ -1422,37 +1183,8 @@ def cases_list(
     if not show_archived:
         qry = qry.filter(text("(archived IS NULL OR archived = 0)"))
 
-    # Simple case-number search
     if case:
         qry = qry.filter(Case.case_number.contains(case))
-
-    # Advanced numeric filters
-    if min_arv is not None:
-        qry = qry.filter(Case.arv >= min_arv)
-    if max_arv is not None:
-        qry = qry.filter(Case.arv <= max_arv)
-
-    # Document presence filters
-    if has_mortgage:
-        qry = qry.filter(Case.mortgage_path.isnot(None), Case.mortgage_path != "")
-    if has_current_deed:
-        qry = qry.filter(Case.current_deed_path.isnot(None), Case.current_deed_path != "")
-    if has_liens:
-        # outstanding_liens stored as JSON TEXT; treat non-empty/non-[] as having liens
-        qry = qry.filter(
-            Case.outstanding_liens.isnot(None),
-            Case.outstanding_liens != "",
-            Case.outstanding_liens != "[]",
-        )
-    # Notes presence (via join + count)
-    if has_notes:
-        qry = qry.join(Note).group_by(Case.id).having(func.count(Note.id) > 0)
-
-    # Filing date range (stored as YYYY-MM-DD string)
-    if filing_from:
-        qry = qry.filter(Case.filing_datetime >= filing_from)
-    if filing_to:
-        qry = qry.filter(Case.filing_datetime <= filing_to)
 
     page_size = 10
     total = qry.count()
@@ -1473,14 +1205,6 @@ def cases_list(
             "pagination": pagination,
             "show_archived": bool(show_archived),
             "search_query": case,
-            "min_arv": min_arv,
-            "max_arv": max_arv,
-            "has_mortgage": has_mortgage,
-            "has_current_deed": has_current_deed,
-            "has_liens": has_liens,
-            "has_notes": has_notes,
-            "filing_from": filing_from,
-            "filing_to": filing_to,
         },
     )
 

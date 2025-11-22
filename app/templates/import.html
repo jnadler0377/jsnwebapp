@@ -1,25 +1,11 @@
+
 {% extends "base.html" %}
 {% block content %}
 <h2>Update Case List</h2>
-<p>
-  Choose how many days back to pull from the subscriber portals and which county (or both) to scrape.
-</p>
-
+<p>Choose how many days back to pull from the Pasco Subscriber portal and then import the results.</p>
 <form method="post" action="/update_cases">
-  <div style="margin-bottom:0.5rem;">
-    <label for="since_days">Days to scrape</label>
-    <input id="since_days" name="since_days" type="number" min="0" step="1" value="7" />
-  </div>
-
-  <div style="margin-bottom:0.75rem;">
-    <label for="county_scope">County</label>
-    <select id="county_scope" name="county_scope">
-      <option value="pasco" selected>Pasco only</option>
-      <option value="pinellas">Pinellas only</option>
-      <option value="both">Pasco + Pinellas</option>
-    </select>
-  </div>
-
+  <label for="since_days">Days to scrape</label>
+  <input id="since_days" name="since_days" type="number" min="0" step="1" value="7" />
   <button type="submit">Update</button>
   <p class="muted">You’ll see a live progress log and be redirected when finished.</p>
 </form>
