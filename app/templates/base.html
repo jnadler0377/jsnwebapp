@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>JSN Holdings Foreclosure Manager</title>
+    <link rel="stylesheet" href="/static/style.css">
+  </head>
+  <body>
+    <header class="container">
+      <h1>JSN Holdings Foreclosure Manager</h1>
+      <nav>
+        <a href="/">Cases</a> | <a href="/import">Update Case List</a>
+        {% set _parcel_id = (
+             active_parcel_id if (active_parcel_id is defined and active_parcel_id)
+             else (case.parcel_id if (case is defined and case and case.parcel_id) else None)
+        ) %}
+        {% if _parcel_id %}
+          | <a href="{{ pasco_appraiser_url(_parcel_id) }}" target="_blank" rel="noopener">Pasco Appraiser</a>
+        {% else %}
+          | <a href="https://search.pascopa.com/default.aspx" target="_blank" rel="noopener">Pasco Appraiser</a>
+        {% endif %}
+        | <a href="https://app.pascoclerk.com/appdot-public-online-services-forms-or-search.asp" target="_blank" rel="noopener">Pasco Official Records</a>
+        | <a href="https://www.civitekflorida.com/ocrs/county/51/" target="_blank" rel="noopener">Pasco Clerk of Court</a>
+      </nav>
+    </header>
+
+    <main class="container">
+      {% block content %}{% endblock %}
+    </main>
+
+    <div id="busyOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:1000;">
+      <div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:#fff; padding:1rem 1.5rem; border-radius:10px; box-shadow:0 10px 24px rgba(0,0,0,0.2); text-align:center;">
+        <div class="spinner" style="width:36px; height:36px; border:4px solid #ddd; border-top-color:#333; border-radius:50%; margin:0 auto 0.75rem; animation:spin 1s linear infinite;"></div>
+        <div><strong>Updating cases…</strong><div>Please don’t navigate away.</div></div>
+      </div>
+    </div>
+
+    <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+    <script>
+      document.addEventListener('DOMContentLoaded', function(){
+        document.querySelectorAll('form[data-busy-overlay]').forEach(function(f){
+          f.addEventListener('submit', function(){ document.getElementById('busyOverlay').style.display='block'; });
+        });
+      });
+    </script>
+  </body>
+</html>

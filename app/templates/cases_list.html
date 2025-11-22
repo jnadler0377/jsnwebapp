@@ -1,0 +1,211 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Cases</h2>
+
+{% if cases and cases|length %}
+
+<!-- Filters -->
+<form id="filter-form" method="get" action="/cases" style="margin-bottom: 1rem;">
+  <div style="display:flex; flex-wrap:wrap; gap:0.75rem; align-items:flex-end;">
+
+    <div>
+      <label for="case-search">Case #</label><br>
+      <input id="case-search" type="search" name="case" value="{{ search_query or '' }}" placeholder="Search case #">
+    </div>
+
+    <div>
+      <label for="min_arv">Min ARV</label><br>
+      <input id="min_arv" type="number" step="0.01" name="min_arv" value="{{ min_arv if min_arv is not none else '' }}">
+    </div>
+
+    <div>
+      <label for="max_arv">Max ARV</label><br>
+      <input id="max_arv" type="number" step="0.01" name="max_arv" value="{{ max_arv if max_arv is not none else '' }}">
+    </div>
+
+    <div>
+      <label for="filing_from">Filed from</label><br>
+      <input id="filing_from" type="date" name="filing_from" value="{{ filing_from or '' }}">
+    </div>
+
+    <div>
+      <label for="filing_to">Filed to</label><br>
+      <input id="filing_to" type="date" name="filing_to" value="{{ filing_to or '' }}">
+    </div>
+
+    <div style="display:flex; flex-direction:column; gap:0.25rem; padding-left:0.75rem; border-left:1px solid #ddd;">
+      <label>
+        <input type="checkbox" name="show_archived" value="1" {% if show_archived %}checked{% endif %}>
+        Show archived
+      </label>
+      <label>
+        <input type="checkbox" name="has_mortgage" value="1" {% if has_mortgage %}checked{% endif %}>
+        Has mortgage PDF
+      </label>
+      <label>
+        <input type="checkbox" name="has_current_deed" value="1" {% if has_current_deed %}checked{% endif %}>
+        Has current deed
+      </label>
+      <label>
+        <input type="checkbox" name="has_liens" value="1" {% if has_liens %}checked{% endif %}>
+        Has liens
+      </label>
+      <label>
+        <input type="checkbox" name="has_notes" value="1" {% if has_notes %}checked{% endif %}>
+        Has notes
+      </label>
+    </div>
+
+    <div style="margin-left:auto; display:flex; gap:0.5rem;">
+      <button class="btn" type="submit">Apply filters</button>
+      <a class="btn" href="/cases">Clear</a>
+    </div>
+  </div>
+</form>
+
+<form id="bulk-actions" method="post">
+  <div style="display:flex; gap:0.5rem; align-items:center; margin-bottom:0.5rem;">
+    <button class="btn" type="submit" formaction="/cases/archive">Archive selected</button>
+    <button class="btn" type="submit" formaction="/cases/export">Export selected (CSV)</button>
+    <button class="btn" type="button" id="unarchive-selected">Unarchive selected</button>
+  </div>
+
+  <table class="table">
+    <thead>
+      <tr>
+        <th><input type="checkbox" id="check-all"></th>
+        <th>Case #</th>
+        <th>Filed</th>
+        <th>Style</th>
+        <th>Address</th>
+        <th>ARV</th>
+        <th>Flags</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in cases %}
+      <tr data-href="/cases/{{ c.id }}" data-id="{{ c.id }}" {% if c.archived %}class="faded"{% endif %}>
+        <td><input type="checkbox" name="ids" value="{{ c.id }}" onclick="event.stopPropagation()"></td>
+        <td>{{ c.case_number }}</td>
+        <td>{{ c.filing_datetime or '' }}</td>
+        <td>{{ c.style or '' }}</td>
+        <td>
+          {% if c.address_override %}
+            {{ c.address_override }}
+          {% elif c.address %}
+            {{ c.address }}
+          {% else %}
+            —
+          {% endif %}
+        </td>
+        <td>
+          {% if c.arv %}${{ '%.0f'|format(c.arv)|replace(',', ',') }}{% else %}—{% endif %}
+        </td>
+        <td>
+          {% if c.archived %}<span class="pill">Archived</span>{% endif %}
+          {% if c.mortgage_path %}<span class="pill">Mortgage</span>{% endif %}
+          {% if c.current_deed_path %}<span class="pill">Deed</span>{% endif %}
+          {% if c.outstanding_liens and c.outstanding_liens != '[]' %}<span class="pill">Liens</span>{% endif %}
+          {% if c.notes and c.notes|length %}<span class="pill">Notes</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div style="margin-top:0.5rem; display:flex; justify-content:space-between; align-items:center;">
+    <div>
+      Page {{ pagination.page }} of {{ pagination.pages }} ({{ pagination.total }} cases)
+    </div>
+    <div>
+      {% if pagination.page > 1 %}
+        <a class="btn" href="?page={{ pagination.page - 1 }}
+          {% if search_query %}&case={{ search_query }}{% endif %}
+          {% if min_arv is not none %}&min_arv={{ min_arv }}{% endif %}
+          {% if max_arv is not none %}&max_arv={{ max_arv }}{% endif %}
+          {% if filing_from %}&filing_from={{ filing_from }}{% endif %}
+          {% if filing_to %}&filing_to={{ filing_to }}{% endif %}
+          {% if show_archived %}&show_archived=1{% endif %}
+          {% if has_mortgage %}&has_mortgage=1{% endif %}
+          {% if has_current_deed %}&has_current_deed=1{% endif %}
+          {% if has_liens %}&has_liens=1{% endif %}
+          {% if has_notes %}&has_notes=1{% endif %}
+        ">Prev</a>
+      {% endif %}
+      {% if pagination.page < pagination.pages %}
+        <a class="btn" href="?page={{ pagination.page + 1 }}
+          {% if search_query %}&case={{ search_query }}{% endif %}
+          {% if min_arv is not none %}&min_arv={{ min_arv }}{% endif %}
+          {% if max_arv is not none %}&max_arv={{ max_arv }}{% endif %}
+          {% if filing_from %}&filing_from={{ filing_from }}{% endif %}
+          {% if filing_to %}&filing_to={{ filing_to }}{% endif %}
+          {% if show_archived %}&show_archived=1{% endif %}
+          {% if has_mortgage %}&has_mortgage=1{% endif %}
+          {% if has_current_deed %}&has_current_deed=1{% endif %}
+          {% if has_liens %}&has_liens=1{% endif %}
+          {% if has_notes %}&has_notes=1{% endif %}
+        ">Next</a>
+      {% endif %}
+    </div>
+  </div>
+</form>
+
+<script>
+(function() {
+  const tbody = document.querySelector('tbody');
+  if (!tbody) return;
+
+  // Row click navigation
+  tbody.addEventListener('click', function(e) {
+    const tr = e.target.closest('tr[data-href]');
+    if (!tr) return;
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON' || e.target.tagName === 'A') return;
+    const href = tr.getAttribute('data-href');
+    if (href) window.location.href = href;
+  });
+
+  // Check-all
+  const checkAll = document.getElementById('check-all');
+  if (checkAll) {
+    checkAll.addEventListener('change', function() {
+      const boxes = tbody.querySelectorAll('input[type="checkbox"][name="ids"]');
+      boxes.forEach(cb => { cb.checked = checkAll.checked; });
+    });
+  }
+
+  function selectedIds() {
+    const ids = [];
+    document.querySelectorAll('input[name="ids"]:checked').forEach(cb => {
+      ids.push(cb.value);
+    });
+    return ids;
+  }
+
+  // Unarchive via AJAX
+  const unarchiveBtn = document.getElementById('unarchive-selected');
+  if (unarchiveBtn) {
+    unarchiveBtn.addEventListener('click', async function(e) {
+      e.preventDefault();
+      const ids = selectedIds();
+      if (!ids.length) {
+        alert('Select at least one case first.');
+        return;
+      }
+      const form = new FormData();
+      ids.forEach(id => form.append('ids', id));
+      try {
+        const res = await fetch('/cases/unarchive_async', { method: 'POST', body: form });
+        if (!res.ok) throw new Error('Request failed: ' + res.status);
+        location.reload();
+      } catch (err) {
+        alert(err.message || String(err));
+      }
+    });
+  }
+})();
+</script>
+
+{% else %}
+  <p>No cases imported yet. Go to <a href="/import">Update Case List</a>.</p>
+{% endif %}
+{% endblock %}

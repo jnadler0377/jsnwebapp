@@ -1,0 +1,333 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head>
+<title>PASCOCLERK.COM - PA-Results-or-image</title>
+
+<!-- start base head -->
+        <!-- *head* -->
+
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<link rel="icon" href="/favicon.ico" type="image/x-icon" />
+<link rel="shortcut icon" href="/favicon.ico" type="image/x-icon" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png"/>
+<link rel="apple-touch-icon-precomposed" href="/apple-touch-icon.png"/>
+<link href="style.css" rel="stylesheet" type="text/css" />
+<link href="layout.css?t=20190701" rel="stylesheet" type="text/css" />
+<link href="print-view.css" rel="stylesheet" media="print" type="text/css" />
+<link rel="stylesheet" type="text/css" href="balloontip.css" />
+<!--[if IE]>
+<style>
+ #header { background:url(images/Main3.png); }
+</style>
+<![endif]-->
+<script type="text/javascript" src="balloontip.js"></script>
+<link rel="stylesheet" href="dhtmlwindow/windowfiles/dhtmlwindow.css" type="text/css" />
+<script type="text/javascript" src="dhtmlwindow/windowfiles/dhtmlwindow.js"></script>
+<link rel="stylesheet" href="dhtmlwindow/modalfiles/modal.css" type="text/css" />
+<script type="text/javascript" src="dhtmlwindow/modalfiles/modal.js"></script>
+<!-- <link rel="stylesheet" href="searchbar.css" type="text/css" media="screen" /> -->
+<!-- <script type="text/javascript" src="searchbar.js"></script> -->
+<script type="text/javascript" src="jquery.min.js"></script>
+<!-- <script type="text/javascript" src="staticlogo.js"></script> -->
+<script type="text/javascript">
+<!--
+
+    var objwindow = null;
+
+    var tooltips = new Array
+    (
+      "Quick Links, Message from the Clerk, Compliments and Awards, Latest News, Disclaimers and Privacy Information.",
+      "Contact Us, Clerk's Administrative Services including Human Resources and Internal Audit, Annual Reports and related External Links.",
+      "Statistical Reports.",
+      "Judicial Assignments, Jury Service, Courts Records Search, Costs and Fees, Traffic, Criminal, Civil, Probate, Family Law, Locations for Court File Viewing.",
+      "Financial Services, Comprehensive Annual Finance Reports (CAFR) and Pasco County Single Audit Reports.",
+      "Search Official Records (Mortgages, Deeds, Judgments, etc.) Passport Applications, Tax Deed Sales, Board Records, Marriage Licenses, How to Record a Document and Recording Fees.",
+      "Court Records Search, Official Records Search, Job Applications, Jury Service, Self Help Court Forms, Online Payment Options, Foreclosure Auctions, Redaction Requests.",
+      "Enhanced Internet Access Service (EIAS) designed for business users."
+    );
+
+    function showtip(id, shown)
+    {
+      if (id == undefined || isNaN(id))
+      {
+        var srcobj = null;
+
+        if (typeof(this) != 'undefined')
+          srcobj = this;
+        else // cross-browser support
+        {
+          var evt = window.event || e;
+          if (!evt.target) evt.target = evt.srcElement;
+          srcobj = evt.target;
+        }
+
+        id = srcobj.getAttribute("tag");
+      }
+      if (shown == undefined) shown = true;
+
+      var tt = document.getElementById("header_tooltip");
+      if (tt)
+      {
+        if (shown)
+        {
+          if (document.all)
+            tt.innerText = tooltips[parseInt(id)];
+          else
+            tt.textContent = tooltips[parseInt(id)];
+
+          tt.style.display = "block";
+          tt.style.visibility = "visible";
+        }
+        else
+        {
+          tt.style.visibility = "hidden";
+          tt.style.display = "none";
+        }
+      }
+    }
+
+    function hidetip()
+    {
+      showtip(this.getAttribute("tag"), false);
+    }
+
+    function inittip()
+    {
+      var mnu = document.getElementById("headermenu");
+      if (mnu)
+      {
+        var x = 0;
+        for (var i = 0; i < mnu.childNodes.length; i++)
+        {
+          if (mnu.childNodes[i].tagName == "A")
+          {
+            mnu.childNodes[i].setAttribute("tag", x);
+            mnu.childNodes[i].onmouseover = showtip;
+            mnu.childNodes[i].onmouseout = hidetip;
+            x++;
+          }
+        }
+      }
+
+      var obj = document.getElementById("content");
+      if (obj)
+      {
+        var tt = document.createElement("div");
+        if (tt)
+        {
+          tt.id = "header_tooltip";
+          tt.style.width = (obj.offsetWidth - 46) + "px";
+          obj.insertBefore(tt, obj.childNodes[0]);
+
+          var elemPosX = obj.offsetLeft;
+          var elemPosY = obj.offsetTop;
+          obj = obj.offsetParent;
+          
+          while(obj)
+          {
+            elemPosX += obj.offsetLeft;
+            elemPosY += obj.offsetTop;
+            
+            obj = obj.offsetParent;
+          }
+
+          tt.style.left = ((document.all) ? 19 : 0) + ((window.opera) ? 19 : 0) + elemPosX;
+          tt.style.top = elemPosY;
+        }
+      }
+    }
+
+    if (window.addEventListener)
+    {
+      window.addEventListener("load", inittip, false);
+      window.addEventListener("resize", inittip, false);
+    }
+    else if (window.attachEvent)
+    {
+      window.attachEvent("onload", inittip);
+      window.attachEvent("onresize", inittip);
+    }
+    else if (document.getElementById)
+    {
+      window.onload = inittip;
+      window.resize = inittip;
+    }
+
+    function popup(mylink, windowname)
+    {
+      if (!window.focus) return true;
+
+      var href;
+      if (typeof(mylink) == 'string')
+        href = mylink;
+      else
+          href = mylink.href;
+
+      window.open(href, windowname, 'width=500,height=450,scrollbars=yes');
+      return false;
+    }
+
+    function objwindow_close(redirect_url)
+    {
+      if (objwindow)
+      {
+        try {
+
+          objwindow.hide();
+          objwindow = null;
+
+        }
+        catch (e) {}
+      }
+
+      var objHeader = document.getElementById("header");
+      if (objHeader) objHeader.style.visibility = "visible";
+
+      if (redirect_url != undefined)
+        location.href = redirect_url;
+    }
+
+-->
+</script>
+
+<!-- *head* -->
+
+<!-- end base head -->
+
+<!-- start google analytics-->  
+    <script type="text/javascript">
+
+  var _gaq = _gaq || [];
+  _gaq.push(['_setAccount', 'UA-28310487-1']);
+  _gaq.push(['_trackPageview']);
+
+  (function() {
+    var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;
+    ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';
+    var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);
+  })();
+
+
+</script>
+<!-- end google analytics-->
+</head>
+<body id="page99">
+
+<!-- start base nav pub-->
+    <div class="top-tail">
+    <div class="bottom-tail">
+        <div id="return">
+            <!--header -->
+            <div class="print-header">
+                <!--				<img src="images/header-print.jpg" />-->
+                <img alt="Nikki Alvarez-Sowles, Esquire Pasco County Clerk & Comptroller" src="images/Main3.png" />
+            </div>
+            <div class="nav-header">
+                <!--     <img SRC="images/header-bg-wide-09.jpg">  -->
+                <img alt="Nikki Alvarez-Sowles, Esquire Pasco County Clerk & Comptroller" src="images/Main3.png" height="160" width="946" />
+            </div>
+
+
+        </div>     <!--added on 11/15/2019-->
+    </div>     <!--added on 11/15/2019-->
+</div>         <!--added on 11/15/2019-->
+
+<!-- end base nav sub-->
+ 
+    <div class="container" style="width: 900px;">
+    <DIV CLASS="box">
+        <div class="corner-top-left"></div>
+        <div class="top-tail"><div class="indent"></div></DIV>
+        <div class="corner-top-right"></div>
+    </div>
+  
+  
+<table BGCOLOR='#C5C4C2' cellpadding="0" cellspacing="2" border="0" align="left" WIDTH=100%" role="presentation"><tr>
+<!-- button 1 -->
+<td style="width:150; height:30; padding-top:2px; padding-bottom:0px;  font-size:12px;  font-family:Arial, sans-serif; text-align:center;  background-color:#C5C4C2; color:#000000; border-width:3px; border-style:solid;  border-color:#F8F8F8 #707070 #505050 #F8F8F8; padding-top:2px; padding-bottom:0px"
+ onmouseover="this.style.cursor='hand'; this.style.backgroundColor='#646362'; this.style.color='#FFFFFF';"
+ onmousedown="this.style.backgroundColor='#646362'; this.style.color='#FFFFFF'; this.style.borderColor='#808080 #F8F8F8 #F8F8F8 #808080'; this.style.paddingTop=0; this.style.paddingBottom=2;"
+ onmouseup=  "this.style.backgroundColor='#C5C4C2'; this.style.color='#000000'; this.style.borderColor='#F8F8F8 #707070 #505050 #F8F8F8'; this.style.paddingTop=2; this.style.paddingBottom=0;"
+ onmouseout= "this.style.cursor='normal'; this.style.backgroundColor='#C5C4C2'; this.style.color='#000000'; this.style.borderColor='#F8F8F8 #707070 #505050 #F8F8F8'; this.style.paddingTop=2; this.style.paddingBottom=0;"
+ onclick="location='index.asp'"
+ title="Home" ><script>document.write("Home")</script></td>
+<!-- button 2 -->
+<td style="width:150; height:30; padding-top:2px; padding-bottom:0px;  font-size:12px;  font-family:Arial, sans-serif; text-align:center;  background-color:#C5C4C2; color:#000000; border-width:3px; border-style:solid;  border-color:#F8F8F8 #707070 #505050 #F8F8F8; padding-top:2px; padding-bottom:0px"
+ onmouseover="this.style.cursor='hand'; this.style.backgroundColor='#646362'; this.style.color='#FFFFFF';"
+ onmousedown="this.style.backgroundColor='#646362'; this.style.color='#FFFFFF'; this.style.borderColor='#808080 #F8F8F8 #F8F8F8 #808080'; this.style.paddingTop=0; this.style.paddingBottom=2;"
+ onmouseup=  "this.style.backgroundColor='#C5C4C2'; this.style.color='#000000'; this.style.borderColor='#F8F8F8 #707070 #505050 #F8F8F8'; this.style.paddingTop=2; this.style.paddingBottom=0;"
+ onmouseout= "this.style.cursor='normal'; this.style.backgroundColor='#C5C4C2'; this.style.color='#000000'; this.style.borderColor='#F8F8F8 #707070 #505050 #F8F8F8'; this.style.paddingTop=2; this.style.paddingBottom=0;"
+ onclick="location='http://www.pascopa.com/'"
+ title="Property Appraiser" ><script>document.write("Property Appraiser")</script></td>
+<!-- button 3 -->
+<td style="width:150; height:30; padding-top:2px; padding-bottom:0px;  font-size:12px;  font-family:Arial, sans-serif; text-align:center;  background-color:#C5C4C2; color:#000000; border-width:3px; border-style:solid;  border-color:#F8F8F8 #707070 #505050 #F8F8F8; padding-top:2px; padding-bottom:0px"
+ onmouseover="this.style.cursor='hand'; this.style.backgroundColor='#646362'; this.style.color='#FFFFFF';"
+ onmousedown="this.style.backgroundColor='#646362'; this.style.color='#FFFFFF'; this.style.borderColor='#808080 #F8F8F8 #F8F8F8 #808080'; this.style.paddingTop=0; this.style.paddingBottom=2;"
+ onmouseup=  "this.style.backgroundColor='#C5C4C2'; this.style.color='#000000'; this.style.borderColor='#F8F8F8 #707070 #505050 #F8F8F8'; this.style.paddingTop=2; this.style.paddingBottom=0;"
+ onmouseout= "this.style.cursor='normal'; this.style.backgroundColor='#C5C4C2'; this.style.color='#000000'; this.style.borderColor='#F8F8F8 #707070 #505050 #F8F8F8'; this.style.paddingTop=2; this.style.paddingBottom=0;"
+ onclick="location='javascript:history.go(-1)'"
+ title="Back" ><script>document.write("Back")</script></td>
+<td style="width:40%; height:30; padding-top:2px; padding-bottom:0px;  font-size:12px;  font-family:Arial, sans-serif; text-align:center;  background-color:#C5C4C2; color:#000000; border-width:3px; border-style:solid;  border-color:#F8F8F8 #808080 #505050 #F8F8F8; padding-top:2px; padding-bottom:0px">&nbsp;</TD></tr>
+</table>
+
+				<div class="box">
+					<div class="top-row">
+                    <BR>
+                    <!-- Begin Editable Area -->
+                      <meta http-equiv='refresh' content='2; url=public-pa-results-or-image-view2.asp?instrument=2013148783&sid=&t=1762249271' />
+                        
+                        
+                        <div class="results_courtsdiv">
+                          <table width="100%" border="0" cellspacing="0" cellpadding="0" role="presentation">
+                            <tr> 
+                              <td>
+                                <p class="noticeheadline">Instrument: 2013148783
+                              </td>
+                              <td>
+                                
+                              </td>
+                            </tr>
+                          </table>
+                       </div>   
+                
+                    <br /><br /><font style='color: #000000; font-weight: bold;'>&nbsp;Please wait while the image is being retrieved...</font>
+                                        
+                                        
+                    <!-- End Editable Area -->            
+                   
+                                
+                    
+                    </div>
+					<div class="container">
+						<div class="corner-bottom-left"></div>
+						<div class="bot-tail"><div class="indent"></div></DIV>
+						<div class="corner-bottom-right"></div>
+                    </div>
+                </div> 
+               
+                <!--bright red below white box
+				<div class="indent">
+
+				</div>
+			</div>-->
+
+<!-- start base footer --> 
+        <!-- *footer* -->
+			<div id="footer"; style="color:#ffffff">
+
+				Excellence...Always<br />
+				Pasco County Clerk & Comptroller &copy; 2020<br />
+
+			</div>
+
+		</div>
+	</div>
+	</div>
+
+    <!--# include file = "base_footer_searchbar.html"-->
+
+</body>
+    <!-- *footer* -->
+
+<!-- end base footer -->
+</html>

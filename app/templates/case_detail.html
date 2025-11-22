@@ -1,0 +1,433 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Case {{ case.case_number }}</h2>
+<a class="btn" href="/cases/{{ case.id }}/report" target="_blank"
+   style="font-size:0.85em; padding:0.4em 0.7em;">
+  📄 PDF Report
+</a>
+
+<a class="btn" href="/cases/{{ case.id }}/deal-pdf" target="_blank"
+   style="font-size:0.85em; padding:0.4em 0.7em; margin-left:0.5rem;">
+  💰 Deal Calculator PDF
+</a>
+
+<!-- Two-column wrapper ONLY for address/photo (left) and Outstanding Liens (right) -->
+<div class="addr-photo-liens">
+  <div class="left-col">
+    <p class="address-line"><strong>Address:</strong> {{ (case.address_override or case.address)|title }}</p>
+    <a href="#" onclick="toggleAddressEdit(true); return false;">edit</a>
+    <div id="addressEdit" style="display:none; margin-top:0.5rem;">
+      <form method="post" action="/cases/{{ case.id }}/update">
+        <input type="text" name="address_override" placeholder="Address" value="{{ (case.address_override or case.address)|title }}">
+        <button class="btn" type="submit">Save</button>
+        <button class="btn" type="button" onclick="toggleAddressEdit(false)">Cancel</button>
+      </form>
+    </div>
+
+    {% if case.address_override %}
+      <div style="margin:0.75rem 0;">
+        <img src="{{ streetview_url(case.address_override) }}" alt="Street view" style="max-width:100%; border-radius:8px; border:1px solid #ddd;">
+      </div>
+    {% endif %}
+  </div>
+
+  <div class="right-col">
+    <div id="outstanding-liens" class="liens-panel">
+      <div class="liens-header-row"><div class="liens-header">Outstanding Liens</div><a id="lien-modal-open" class="lien-link">Add Lien</a></div>
+      <div id="liens-list" class="liens-list"></div>
+      <div id="liens-saving" class="liens-saving" style="display:none;">Saving…</div>
+    </div>
+  </div>
+</div>
+
+<!-- Shared Lien Modal (Add/Edit) -->
+<div id="lienModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:1000;">
+  <div class="modal-card">
+    <h4 id="lienModalTitle" style="margin-top:0;">Add lien</h4>
+    <form id="lienModalForm">
+      <input type="hidden" id="lienIndex" value="-1">
+      <div class="lien-form-grid">
+        <div>
+          <label class="lien-label">Holder</label>
+          <input type="text" id="lienHolderInput" class="lien-field" placeholder="Lien holder">
+        </div>
+        <div>
+          <label class="lien-label">Amount</label>
+          <input type="text" id="lienAmountInput" class="lien-field" placeholder="$ Amount">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" type="button" id="lienModalCancel">Cancel</button>
+        <button class="btn" type="submit" id="lienModalSave">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<hr>
+
+<section>
+  <h3>Defendants</h3>
+  {% if case.defendants and case.defendants|length %}
+    <ul>
+      {% for d in case.defendants %}
+        <li>{{ d.name }}</li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p><em>No defendants recorded.</em></p>
+  {% endif %}
+</section>
+
+<div class="grid">
+
+  <section>
+    <h3>Property</h3>
+    <p><strong>Filing Date:</strong> {{ case.filing_datetime or '—' }}</p>
+    <p><strong>Parcel ID:</strong> {{ case.parcel_id or '—' }}</p>
+
+    <a href="#" onclick="toggleParcelEdit(true); return false;">edit</a>
+    <div id="parcelEdit" style="display:none; margin-top:0.5rem;">
+      <form method="post" action="/cases/{{ case.id }}/update">
+        <input type="text" name="parcel_id" placeholder="Parcel ID" value="{{ case.parcel_id or '' }}">
+        <button class="btn" type="submit">Save</button>
+        <button class="btn" type="button" onclick="toggleParcelEdit(false)">Cancel</button>
+      </form>
+    </div>
+  </section>
+
+  <section>
+    <h3>Numbers</h3>
+    <form method="post" action="/cases/{{ case.id }}/update">
+      <label>ARV</label>
+      <input type="number" step="0.01" name="arv" value="{{ case.arv or 0 }}">
+      <label>Rehab</label>
+      <input type="number" step="0.01" name="rehab" value="{{ case.rehab or 0 }}">
+      <label>Closing Costs</label>
+      <input type="number" step="0.01" name="closing_costs" value="{{ case.closing_costs or 0 }}">
+      <p><strong>JSN Max Cash Offer:</strong> {{ offer_70 | currency }}</p>
+      <button class="btn" type="submit">Save</button>
+    </form>
+  </section>
+
+</div>
+
+<section>
+  <h3>Documents</h3>
+
+  <table class="doc-table">
+    <thead>
+      <tr>
+        <th style="text-align:left;">Document</th>
+        <th style="text-align:center;">View</th>
+        <th style="text-align:left;">Upload / Replace</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Verified Complaint</td>
+        <td style="text-align:center;">
+          {% if case.verified_complaint_path %}
+            <a href="{{ url_for('uploads', path=case.verified_complaint_path) }}" target="_blank">Open</a>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          <form method="post" action="/cases/{{ case.id }}/upload/verified" enctype="multipart/form-data" style="display:flex; gap:8px;">
+            <input type="file" name="verified_complaint" accept="application/pdf" required>
+            <button class="btn" type="submit">{{ 'Replace' if case.verified_complaint_path else 'Upload' }}</button>
+          </form>
+        </td>
+      </tr>
+
+      <tr>
+        <td>Value Calculation</td>
+        <td style="text-align:center;">
+          {% if case.value_calc_path %}
+            <a href="{{ url_for('uploads', path=case.value_calc_path) }}" target="_blank">Open</a>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          <form method="post" action="/cases/{{ case.id }}/upload/value_calc" enctype="multipart/form-data" style="display:flex; gap:8px;">
+            <input type="file" name="value_calc" accept="application/pdf" required>
+            <button class="btn" type="submit">{{ 'Replace' if case.value_calc_path else 'Upload' }}</button>
+          </form>
+        </td>
+      </tr>
+
+      <tr>
+        <td>Mortgage</td>
+        <td style="text-align:center;">
+          {% if case.mortgage_path %}
+            <a href="{{ url_for('uploads', path=case.mortgage_path) }}" target="_blank">Open</a>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          <form method="post" action="/cases/{{ case.id }}/upload/mortgage" enctype="multipart/form-data" style="display:flex; gap:8px;">
+            <input type="file" name="mortgage" accept="application/pdf" required>
+            <button class="btn" type="submit">{{ 'Replace' if case.mortgage_path else 'Upload' }}</button>
+          </form>
+        </td>
+      </tr>
+
+      <tr>
+        <td>Current Deed</td>
+        <td style="text-align:center;">
+          {% if case.current_deed_path %}
+            <a href="{{ url_for('uploads', path=case.current_deed_path) }}" target="_blank">Open</a>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          <form method="post" action="/cases/{{ case.id }}/upload/current-deed" enctype="multipart/form-data" style="display:flex; gap:8px;">
+            <input type="file" name="current_deed" accept="application/pdf" required>
+            <button class="btn" type="submit">{{ 'Replace' if case.current_deed_path else 'Upload' }}</button>
+          </form>
+        </td>
+      </tr>
+
+      <tr>
+        <td>Previous Deed</td>
+        <td style="text-align:center;">
+          {% if case.previous_deed_path %}
+            <a href="{{ url_for('uploads', path=case.previous_deed_path) }}" target="_blank">Open</a>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          <form method="post" action="/cases/{{ case.id }}/upload/previous-deed" enctype="multipart/form-data" style="display:flex; gap:8px;">
+            <input type="file" name="previous_deed" accept="application/pdf" required>
+            <button class="btn" type="submit">{{ 'Replace' if case.previous_deed_path else 'Upload' }}</button>
+          </form>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h3>Notes</h3>
+  <button class="btn" type="button" onclick="document.getElementById('noteModal').style.display='block'">Add note</button>
+
+  <div id="noteModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:1000;">
+    <div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:#fff; padding:1rem; width:min(560px,90vw); border-radius:10px;">
+      <h4 style="margin-top:0;">New note</h4>
+      <form method="post" action="/cases/{{ case.id }}/notes/add">
+        <textarea name="content" rows="5" style="width:100%;" placeholder="Type note..."></textarea>
+        <div style="margin-top:0.75rem; display:flex; gap:0.5rem; justify-content:flex-end;">
+          <button class="btn" type="button" onclick="document.getElementById('noteModal').style.display='none'">Cancel</button>
+          <button class="btn" type="submit">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  {% set note_list = (case.notes if case.notes is not none else []) %}
+  <ul class="note-list">
+    {% if note_list|length %}
+      {% for n in note_list|sort(attribute='id', reverse=True) %}
+        <li><small>{{ n.created_at }}</small><br>{{ n.content }}</li>
+      {% endfor %}
+    {% else %}
+      <li><em>No notes yet.</em></li>
+    {% endif %}
+  </ul>
+</section>
+
+<script>
+function toggleParcelEdit(show) {
+  document.getElementById('parcelEdit').style.display = show ? '' : 'none';
+}
+function toggleAddressEdit(show) {
+  document.getElementById('addressEdit').style.display = show ? '' : 'none';
+}
+
+// ---- Outstanding Liens client code (shared modal) ----
+function formatCurrency(val) {
+  let s = String(val ?? '').replace(/[^\d.]/g, '');
+  if (s === '') return '$0.00';
+  let n = parseFloat(s);
+  if (isNaN(n)) n = 0;
+  return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
+}
+
+(function() {
+  const caseId = {{ case.id }};
+  const list = document.getElementById('liens-list');
+  const saving = document.getElementById('liens-saving');
+  const modal = document.getElementById('lienModal');
+  const openBtn = document.getElementById('lien-modal-open');
+  const form = document.getElementById('lienModalForm');
+  const titleEl = document.getElementById('lienModalTitle');
+  const idxInput = document.getElementById('lienIndex');
+  const holderInput = document.getElementById('lienHolderInput');
+  const amountInput = document.getElementById('lienAmountInput');
+  const cancelBtn = document.getElementById('lienModalCancel');
+
+  let liens = [];
+
+  function render() {
+    list.innerHTML = '';
+    if (!liens.length) {
+      const hint = document.createElement('div');
+      hint.className = 'liens-empty-hint';
+      hint.textContent = 'No recorded liens.';
+      list.appendChild(hint);
+      return;
+    }
+    liens.forEach((lien, idx) => {
+      const row = document.createElement('div');
+      row.className = 'lien-row';
+
+      const holder = document.createElement('span');
+      holder.className = 'lien-holder';
+      holder.textContent = lien.holder || '(Unknown holder)';
+
+      const amount = document.createElement('span');
+      amount.className = 'lien-amount';
+      amount.textContent = formatCurrency(lien.amount);
+
+      row.appendChild(holder);
+      row.appendChild(amount);
+
+      // Click row -> open modal in EDIT mode
+      row.addEventListener('click', () => {
+        titleEl.textContent = 'Edit lien';
+        idxInput.value = String(idx);
+        holderInput.value = lien.holder || '';
+        amountInput.value = lien.amount || '';
+        modal.style.display = 'block';
+        setTimeout(() => holderInput.focus(), 0);
+      });
+
+      list.appendChild(row);
+    });
+  }
+
+  function save() {
+    saving.style.display = '';
+    fetch(`/cases/${caseId}/liens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ outstanding_liens: liens.filter(l => (l.holder || '').trim().length > 0).map(l => ({ holder: l.holder, amount: formatCurrency(l.amount) })) }),
+    })
+    .then(r => { if (!r.ok) throw new Error('Save failed'); return r.json(); })
+    .then(data => { liens = data || []; render(); })
+    .catch(err => { console.error(err); alert('Failed to save liens.'); })
+    .finally(() => saving.style.display = 'none');
+  }
+
+  function load() {
+    fetch(`/cases/${caseId}/liens`)
+      .then(r => r.json())
+      .then(data => { liens = data || []; render(); })
+      .catch(() => { liens = []; render(); });
+  }
+
+  // Open modal in ADD mode
+  openBtn.addEventListener('click', () => {
+    titleEl.textContent = 'Add lien';
+    idxInput.value = '-1';
+    holderInput.value = '';
+    amountInput.value = '';
+    modal.style.display = 'block';
+    setTimeout(() => holderInput.focus(), 0);
+  });
+
+  // Cancel/close
+  cancelBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    modal.style.display = 'none';
+  });
+
+  // Save (add or edit)
+  form.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const idx = parseInt(idxInput.value || '-1', 10);
+  const holder = (holderInput.value || '').trim();
+  const amountRaw = (lienAmountInput.value || lienAmountInput.value || '').trim();
+  const amount = formatCurrency(amountRaw);
+  if (idx >= 0 && idx < liens.length) {
+    if (!holder) {
+      liens.splice(idx, 1);
+    } else {
+      liens[idx] = { holder, amount };
+    }
+  } else {
+    if (holder) {
+      liens.push({ holder, amount });
+    }
+  }
+  modal.style.display = 'none';
+  save();
+});
+load();
+})();
+</script>
+
+<style>
+/* Layout wrapper for photo + liens only */
+.addr-photo-liens {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(260px, 1fr);
+  gap: 1rem;
+}
+@media (max-width: 900px) {
+  .addr-photo-liens { grid-template-columns: 1fr; }
+}
+.address-line { font-size: 1.5em; margin-bottom: 0.25rem; }
+
+/* Table & notes (existing styles) */
+.doc-table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+.doc-table th, .doc-table td { border-bottom: 1px solid #812b9b; padding: 8px; }
+.doc-table th { background-color: #812b9b; color: #fff; }
+.doc-table form input[type="file"] { flex: 1; }
+.note-list { list-style: none; padding-left: 0; }
+.note-list li { padding: 6px 0; border-bottom: 1px solid #eee; }
+
+/* Liens */
+.liens-panel { background: transparent; border: none; padding: 0; margin-left: 0.5in; }
+.liens-header-row { display:flex; align-items: baseline; justify-content: flex-start; column-gap: 1em; }
+.liens-header {
+  font-weight: 700;
+  font-size: 1.5em;
+  color: #812b9b;
+  display: inline-block;
+  width: auto;
+}
+#lien-modal-open { color: #004080; background: transparent; border: none; font-weight: 600; cursor: pointer; }
+.liens-list { display:flex; flex-direction:column; gap:.25rem; }
+.liens-saving { font-size:.9em; opacity:.7; margin-top:.25rem; }
+.lien-row { padding: .25rem .35rem; border-radius: 6px; cursor: pointer; display:grid; grid-template-columns: 1fr auto; align-items:center; column-gap:.5rem; }
+.lien-row:hover { background: rgba(0,0,0,0.035); }
+
+.lien-holder { font-weight: 500; }
+
+.lien-amount { font-variant-numeric: tabular-nums; justify-self:end; text-align:right; min-width: 120px; }
+
+/* Modal styling: white background, black text */
+.modal-card {
+  position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+  background:#fff; color:#000; padding:1rem; width:min(560px,90vw); border-radius:10px;
+}
+.lien-form-grid { display:grid; grid-template-columns: 1fr 180px; gap:.75rem; align-items:end; }
+.lien-label { display:block; font-size:.9rem; opacity:.8; color:#000; }
+.lien-field {
+  width:100%; background:#fff; color:#000; border:1px solid #ccc; border-radius:6px;
+  padding:.5rem .6rem; outline:none;
+}
+.lien-field::placeholder { color:#333; }
+
+.liens-empty-hint { opacity: 0.65; font-style: italic; }
+.modal-actions { margin-top:0.75rem; display:flex; gap:0.5rem; justify-content:flex-end; }
+</style>
+{% endblock %}
+
+
+/* v12 overrides for Add Lien link */
+#lien-modal-open {
+  color: inherit;
+  background: transparent;
+  border: none;
+  font: inherit;
+  text-decoration: underline; /* rely on base link style; underline is common default */
+  cursor: pointer;
+  padding: 0;
+}
