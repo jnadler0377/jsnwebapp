@@ -1,0 +1,75 @@
+{# templates/cases/case_detail.html #}
+{% extends "base.html" %}
+{% import "_macros.html" as macros %}
+
+{% block content %}
+  {% set arv = case.arv or 0 %}
+  {% set rehab = case.rehab or 0 %}
+  {% set closing = case.closing_costs or 0 %}
+  {% set jsn_max_offer = (arv - rehab - closing) * 0.7 %}
+
+  <h2>Case {{ case.case_number }}</h2>
+
+  <a class="btn" href="/cases/{{ case.id }}/report" target="_blank"
+     style="font-size:0.85em; padding:0.4em 0.7em;">
+    Deal Calculator
+  </a>
+
+  {% if not (skip_trace and skip_trace.results) %}
+    <form method="post" action="/cases/{{ case.id }}/skip-trace" style="display:inline;">
+      <button class="btn" type="submit"
+              style="font-size:0.85em; padding:0.4em 0.7em; margin-left:0.5rem;">
+        Skip Trace Owner
+      </button>
+    </form>
+  {% endif %}
+
+  <div class="tabs">
+    <button type="button" class="tab-button tab-active" data-tab="overview">Case Overview</button>
+    <button type="button" class="tab-button" data-tab="property">Property Data</button>
+  </div>
+
+  <div id="tab-overview" class="tab-content tab-active">
+    {% include "cases/_case_overview.html" %}
+      </div>
+  <div id="tab-property" class="tab-content">
+    {% include "cases/_case_property_tab.html" %}
+  </div>
+{% endblock %}
+
+{# Optional: if base.html has extra_css / extra_js blocks, hook them #}
+{% block extra_css %}
+  {{ super() }}
+  <link rel="stylesheet" href="{{ url_for('static', path='css/case_detail.css') }}">
+{% endblock %}
+
+{% block extra_js %}
+  {{ super() }}
+  <script src="{{ url_for('static', path='js/case_liens.js') }}"></script>
+  <script src="{{ url_for('static', path='js/case_tabs.js') }}"></script>
+  <script>
+document.addEventListener('DOMContentLoaded', function () {
+  const buttons = document.querySelectorAll('.tab-button');
+  const contents = {
+    overview: document.getElementById('tab-overview'),
+    property: document.getElementById('tab-property'),
+  };
+
+  buttons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      // reset
+      buttons.forEach(b => b.classList.remove('tab-active'));
+      Object.values(contents).forEach(c => c && c.classList.remove('tab-active'));
+
+      // activate chosen
+      btn.classList.add('tab-active');
+      const tab = btn.dataset.tab;
+      if (contents[tab]) {
+        contents[tab].classList.add('tab-active');
+      }
+    });
+  });
+});
+</script>
+
+{% endblock %}

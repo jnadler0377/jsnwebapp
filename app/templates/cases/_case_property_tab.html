@@ -1,0 +1,305 @@
+{# app/templates/cases/_case_property_tab.html #}
+
+<div id="tab-property" class="tab-content">
+  <section class="property-tab">
+    <h3>BatchData Property Profile</h3>
+
+    {% if property_error %}
+      <p class="property-error">{{ property_error }}</p>
+    {% endif %}
+
+    {% if property_data and property_data.get('results') and property_data['results'].get('properties') %}
+      {% set props = property_data['results']['properties'] %}
+      {% set p = props[0] %}
+
+      {# Normalize nested dicts so missing keys don't explode #}
+      {% set addr          = p.get('address')          or {} %}
+      {% set valuation     = p.get('valuation')        or {} %}
+      {% set assessment    = p.get('assessment')       or {} %}
+      {% set tax           = p.get('tax')              or {} %}
+      {% set general       = p.get('general')          or {} %}
+      {% set lot           = p.get('lot')              or {} %}
+      {% set building      = p.get('building')         or {} %} 
+      {% set open_lien     = p.get('openLien')         or {} %}
+      {% set mortgage_hist = p.get('mortgageHistory')  or [] %}
+      {% set owner         = p.get('owner')            or {} %}
+      {% set owner_mail    = owner.get('mailingAddress') or {} %}
+      {% set quick         = p.get('quickLists')       or {} %}
+      {% set meta          = p.get('meta')             or {} %}
+
+      <div class="prop-grid">
+        <!-- Card 1: Address & Basic Info -->
+        <div class="prop-card">
+          <h4>Address &amp; Basic Info</h4>
+
+          <p>
+            <strong>Street:</strong>
+            {% if addr.street is defined %}
+              {{ addr.street }}
+            {% elif addr.streetNoUnit is defined %}
+              {{ addr.streetNoUnit }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          <p>
+            <strong>City / State:</strong>
+            {% if addr.city is defined or addr.state is defined %}
+              {{ addr.city or '' }}{% if addr.city and addr.state %}, {% endif %}{{ addr.state or '' }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          <p>
+            <strong>ZIP:</strong>
+            {% if addr.zip is defined %}
+              {{ addr.zip }}{% if addr.zipPlus4 is defined %}-{{ addr.zipPlus4 }}{% endif %}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          <p>
+            <strong>County:</strong>
+            {% if addr.county is defined %}
+              {{ addr.county }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          <p>
+            <strong>Latitude / Longitude:</strong>
+            {% if addr.latitude is defined and addr.longitude is defined %}
+              {{ '%.6f'|format(addr.latitude) }}, {{ '%.6f'|format(addr.longitude) }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          <p>
+            <strong>Property Type:</strong>
+            {% if general.propertyTypeDetail is defined and general.propertyTypeDetail %}
+              {{ general.propertyTypeDetail }}
+            {% elif general.propertyTypeCategory is defined and general.propertyTypeCategory %}
+              {{ general.propertyTypeCategory }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          <p>
+            <strong>Year Built:</strong>
+            {% if general.yearBuilt is defined %}
+              {{ general.yearBuilt }}
+            {% elif p.yearBuilt is defined %}
+              {{ p.yearBuilt }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          <p>
+            <strong>Square Footage (Living):</strong>
+            {% if building.livingAreaSqft is defined %}
+              {{ '{:,.0f}'.format(building.livingAreaSqft) }}
+            {% elif general.buildingAreaSqft is defined %}
+              {{ '{:,.0f}'.format(general.buildingAreaSqft) }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          <p>
+            <strong>Lot Size:</strong>
+            {% if lot.lotSizeAcres is defined %}
+              {{ '%.3f'|format(lot.lotSizeAcres) }} acres
+            {% elif lot.lotSizeSqft is defined %}
+              {{ '{:,.0f}'.format(lot.lotSizeSqft) }} sqft
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          <p>
+            <strong>Beds / Baths:</strong>
+            {% if building.bedrooms is defined or building.totalBathrooms is defined %}
+              {{ building.bedrooms or '—' }} BR / {{ building.totalBathrooms or '—' }} BA
+            {% else %}
+              —
+            {% endif %}
+          </p>
+        </div>
+
+        <!-- Card 2: Valuation & Tax -->
+        <div class="prop-card">
+          <h4>Valuation &amp; Tax</h4>
+
+          <p>
+            <strong>Estimated Value (AVM):</strong>
+            {% if valuation.estimatedValue is defined %}
+              ${{ '{:,.0f}'.format(valuation.estimatedValue) }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          <p>
+            <strong>Low / High Range:</strong>
+            {% if valuation.lowRangeValue is defined or valuation.highRangeValue is defined %}
+              {% if valuation.lowRangeValue is defined %}
+                ${{ '{:,.0f}'.format(valuation.lowRangeValue) }}
+              {% else %}
+                —
+              {% endif %}
+              –
+              {% if valuation.highRangeValue is defined %}
+                ${{ '{:,.0f}'.format(valuation.highRangeValue) }}
+              {% else %}
+                —
+              {% endif %}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          <p>
+            <strong>Confidence Score:</strong>
+            {% if valuation.confidenceScore is defined %}
+              {{ valuation.confidenceScore }}%
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          <p>
+            <strong>Assessed Value:</strong>
+            {% if assessment.totalAssessedValue is defined %}
+              ${{ '{:,.0f}'.format(assessment.totalAssessedValue) }}
+              {% if assessment.assessmentYear is defined %}
+                (Tax Year {{ assessment.assessmentYear }})
+              {% endif %}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          <p>
+            <strong>Annual Taxes:</strong>
+            {% if tax.taxAmount is defined %}
+              ${{ '{:,.0f}'.format(tax.taxAmount) }}
+              {% if tax.taxYear is defined %}
+                (Tax Year {{ tax.taxYear }})
+              {% endif %}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+        </div>
+
+        <!-- Card 3: Liens & Mortgages -->
+        <div class="prop-card">
+          <h4>Liens &amp; Mortgages</h4>
+
+          <p>
+            <strong>Total Open Liens:</strong>
+            {% if open_lien.totalOpenLienBalance is defined %}
+              ${{ '{:,.0f}'.format(open_lien.totalOpenLienBalance) }}
+              {% if open_lien.totalOpenLienCount is defined %}
+                ({{ open_lien.totalOpenLienCount }} loans)
+              {% endif %}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          <p>
+            <strong>Loan Types:</strong>
+            {% if open_lien.allLoanTypes is defined and open_lien.allLoanTypes %}
+              {{ open_lien.allLoanTypes|join(', ') }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          <p>
+            <strong>Most Recent Mortgage:</strong>
+            {% if mortgage_hist and mortgage_hist|length > 0 %}
+              {% set m = mortgage_hist[0] %}
+              {% if m.originalLoanAmount is defined %}
+                ${{ '{:,.0f}'.format(m.originalLoanAmount) }}
+              {% else %}
+                —
+              {% endif %}
+              {% if m.loanType is defined and m.loanType %}
+                ({{ m.loanType }})
+              {% endif %}
+              {% if m.recordingDate is defined and m.recordingDate %}
+                <br><small>Recorded: {{ m.recordingDate[:10] }}</small>
+              {% endif %}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+        </div>
+
+        <!-- Card 4: Owner & Flags -->
+        <div class="prop-card">
+          <h4>Owner &amp; Flags</h4>
+
+          <p>
+            <strong>Owner:</strong>
+            {% if owner.fullName is defined and owner.fullName %}
+              {{ owner.fullName }}
+            {% elif owner.names is defined and owner.names %}
+              {{ owner.names[0].full or owner.names[0].first }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          <p>
+            <strong>Mailing Address:</strong>
+            {% if owner_mail.street is defined %}
+              {{ owner_mail.street }},
+              {{ owner_mail.city }},
+              {{ owner_mail.state }}
+              {{ owner_mail.zip }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          {# QuickList tags #}
+          {% set tags = [] %}
+          {% if quick.ownerOccupied %}{% set _ = tags.append('Owner Occupied') %}{% endif %}
+          {% if quick.highEquity %}{% set _ = tags.append('High Equity') %}{% endif %}
+          {% if quick.freeAndClear %}{% set _ = tags.append('Free & Clear') %}{% endif %}
+          {% if quick.absenteeOwner %}{% set _ = tags.append('Absentee Owner') %}{% endif %}
+          {% if quick.preforeclosure %}{% set _ = tags.append('Pre-foreclosure') %}{% endif %}
+          {% if quick.taxDefault %}{% set _ = tags.append('Tax Default') %}{% endif %}
+          {% if quick.vacant %}{% set _ = tags.append('Vacant') %}{% endif %}
+          {% if quick.hasHoa %}{% set _ = tags.append('Has HOA') %}{% endif %}
+
+          {% if tags %}
+            <p><strong>Quick Flags:</strong></p>
+            <p>
+              {% for t in tags %}
+                <span class="pill pill-tag">{{ t }}</span>
+              {% endfor %}
+            </p>
+          {% endif %}
+
+          {% if meta.propertyDateModified is defined %}
+            <p><small>Last Updated: {{ meta.propertyDateModified[:10] }}</small></p>
+          {% endif %}
+        </div>
+      </div>
+    {% else %}
+      <p><em>No BatchData property results stored yet for this case.</em></p>
+    {% endif %}
+
+  </section>
+</div>

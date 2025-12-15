@@ -1,0 +1,299 @@
+{# app/templates/cases/_case_overview_tab.html #}
+
+<div id="tab-overview" class="tab-content tab-active">
+
+<!-- Two-column wrapper ONLY for address/photo (left) and Outstanding Liens (right) -->
+<div class="addr-photo-liens">
+  <div class="left-col">
+    <p class="address-line"><strong>Address:</strong> {{ (case.address_override or case.address)|title }}</p>
+    <a href="#" onclick="toggleAddressEdit(true); return false;">edit</a>
+    <div id="addressEdit" style="display:none; margin-top:0.5rem;">
+      <form method="post" action="/cases/{{ case.id }}/update">
+        <input type="text" name="address_override" placeholder="...ss" value="{{ (case.address_override or case.address)|title }}">
+        <button class="btn" type="submit">Save</button>
+        <button class="btn" type="button" onclick="toggleAddressEdit(false)">Cancel</button>
+      </form>
+    </div>
+
+    <p class="property-inline">
+      <strong>Parcel ID:</strong> {{ case.parcel_id or '—' }}
+      &nbsp;|&nbsp;
+      <strong>Filing Date:</strong> {{ case.filing_datetime or '—' }}
+      <a href="#" onclick="toggleParcelEdit(true); return false;" class="inline-edit-link">edit</a>
+    </p>
+    <div id="parcelEdit" style="display:none; margin-top:0.5rem;">
+      <form method="post" action="/cases/{{ case.id }}/update">
+        <input type="text" name="parcel_id" placeholder="Parcel ID" value="{{ case.parcel_id or '' }}">
+        <button class="btn" type="submit">Save</button>
+        <button class="btn" type="button" onclick="toggleParcelEdit(false)">Cancel</button>
+      </form>
+    </div>
+
+    {# Street View: prefer override, fallback to original address #}
+    {% set sv_addr = case.address_override or case.address %}
+
+    <div class="streetview-container">
+      {% if sv_addr %}
+        <img
+          src="{{ streetview_url(sv_addr) }}"
+          alt="Street View"
+          class="streetview-img"
+          onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"
+        >
+        <div class="streetview-placeholder" style="display:none;">No Street View</div>
+      {% else %}
+        <div class="streetview-placeholder">No Street View</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="right-col">
+    <div id="outstanding-liens" class="liens-panel">
+      <div class="liens-header-row">
+        <div class="liens-header">Outstanding Liens</div>
+        <a id="lien-modal-open" class="lien-link">Add Lien</a>
+      </div>
+      <div id="liens-list" class="liens-list"></div>
+      <div id="liens-saving" class="liens-saving" style="display:none;">Saving…</div>
+    </div>
+
+    <section class="numbers-section">
+      <h3>Numbers</h3>
+      <form method="post" action="/cases/{{ case.id }}/update">
+        <label>ARV</label>
+        <input type="number" step="0.01" name="arv" value="{{ arv }}">
+        <label>Rehab</label>
+        <input type="number" step="0.01" name="rehab" value="{{ rehab }}">
+        <label>Closing Costs</label>
+        <input type="number" step="0.01" name="closing_costs" value="{{ closing }}">
+        <p><strong>JSN Max Offer:</strong> {{ jsn_max_offer | currency }}</p>
+        <button class="btn" type="submit">Save</button>
+      </form>
+    </section>
+  </div>
+</div>
+
+<section class="defendants-section">
+  <h3>Defendants</h3>
+  {% if case.defendants and case.defendants|length %}
+    <ul>
+      {% for d in case.defendants %}
+        {% set name = (d.name or '')|string %}
+        {% if name and name|lower != 'nan' %}
+          <li>{{ name }}</li>
+        {% endif %}
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>No defendants recorded.</p>
+  {% endif %}
+</section>
+
+<section class="skip-trace-section">
+  <h3>Skip Trace</h3>
+
+  {% if skip_trace_error %}
+    <p style="color:red; font-weight:bold;">{{ skip_trace_error }}</p>
+  {% elif skip_trace and skip_trace.results %}
+    {% for r in skip_trace.results %}
+      {# Keep propertyAddress available if needed, but don't show it #}
+      {% set pa = r.propertyAddress or {} %}
+
+      {% if r.persons %}
+        <ul class="skip-trace-list">
+          {% for p in r.persons %}
+            <li class="skip-trace-item">
+              {% if p.full_name %}
+                <div><strong>{{ p.full_name }}</strong></div>
+              {% endif %}
+
+              {% if p.phones %}
+                <div>
+                  <strong>Phones:</strong>
+                  <div>
+                    {% for ph in p.phones %}
+                      <div class="skip-phone-line">
+                        {{ format_phone(ph.number) }}
+                        {% if ph.type %} ({{ ph.type }}){% endif %}
+                        {% if ph.score is not none %} – Score: {{ ph.score }}{% endif %}
+                        {% if ph.last_reported %}
+                          – Last: {{ ph.last_reported[:10] }}
+                        {% endif %}
+                        {% if ph.tested is not none %}
+                          – Tested: {{ yn_icon(ph.tested) }}
+                        {% endif %}
+                        {% if ph.reachable is not none %}
+                          – Reachable: {{ yn_icon(ph.reachable) }}
+                        {% endif %}
+                        {% if ph.dnc is not none %}
+                          – DNC: {{ yn_icon(ph.dnc) }}
+                        {% endif %}
+                      </div>
+                    {% endfor %}
+                  </div>
+                </div>
+              {% endif %}
+
+              {% if p.emails %}
+                <div style="margin-top:0.25rem;">
+                  <strong>Emails:</strong>
+                  <div>
+                    {% for em in p.emails %}
+                      <div class="skip-email-line">
+                        {{ em.email }}
+                        {% if em.tested is not none %}
+                          – Tested: {{ yn_icon(em.tested) }}
+                        {% endif %}
+                      </div>
+                    {% endfor %}
+                  </div>
+                </div>
+              {% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p><em>No contact persons found.</em></p>
+      {% endif %}
+    {% endfor %}
+  {% else %}
+    <p><em>No skip trace results yet.</em></p>
+  {% endif %}
+</section>
+
+
+<div class="docs-notes-row">
+  <section class="documents-section">
+    <h3>Documents</h3>
+
+    <ul>
+      {% set has_docs = false %}
+
+      {% if case.verified_complaint_path %}
+        {% set has_docs = true %}
+        <li>
+          Verified Complaint –
+          <a href="{{ url_for('uploads', path=case.verified_complaint_path) }}" target="_blank">
+            View PDF
+          </a>
+        </li>
+      {% endif %}
+
+      {% if case.mortgage_path %}
+        {% set has_docs = true %}
+        <li>
+          Mortgage –
+          <a href="{{ url_for('uploads', path=case.mortgage_path) }}" target="_blank">
+            View PDF
+          </a>
+        </li>
+      {% endif %}
+
+      {% if case.current_deed_path %}
+        {% set has_docs = true %}
+        <li>
+          Current Deed –
+          <a href="{{ url_for('uploads', path=case.current_deed_path) }}" target="_blank">
+            View PDF
+          </a>
+        </li>
+      {% endif %}
+
+      {% if case.previous_deed_path %}
+        {% set has_docs = true %}
+        <li>
+          Previous Deed –
+          <a href="{{ url_for('uploads', path=case.previous_deed_path) }}" target="_blank">
+            View PDF
+          </a>
+        </li>
+      {% endif %}
+
+      {% if case.value_calc_path %}
+        {% set has_docs = true %}
+        <li>
+          Value Calculation –
+          <a href="{{ url_for('uploads', path=case.value_calc_path) }}" target="_blank">
+            View PDF
+          </a>
+        </li>
+      {% endif %}
+
+      {% for d in case.dockets or [] %}
+        {% set has_docs = true %}
+        <li>
+          <a href="{{ d.file_url or '#' }}" target="_blank">
+            {{ d.description or d.file_name or 'Document' }}
+          </a>
+        </li>
+      {% endfor %}
+
+      {% if not has_docs %}
+        <li><em>No documents uploaded.</em></li>
+      {% endif %}
+    </ul>
+
+    <h4 style="margin-top:0.75rem;">Upload document</h4>
+
+    <form method="post"
+          action="/cases/{{ case.id }}/documents/upload"
+          enctype="multipart/form-data"
+          style="display:flex; flex-wrap:wrap; gap:0.5rem; align-items:center; margin-top:0.25rem;">
+      <input type="file" name="file" required
+             accept="application/pdf"
+             style="max-width:260px;">
+
+      <select name="doc_type" required
+              style="min-width:180px;">
+        <option value="" disabled selected>Select type…</option>
+        <option value="verified">Verified Complaint</option>
+        <option value="mortgage">Mortgage</option>
+        <option value="current_deed">Current Deed</option>
+        <option value="previous_deed">Previous Deed</option>
+        <option value="value_calc">Value Calculation</option>
+        <option value="other">Other / Misc</option>
+      </select>
+
+      <button class="btn" type="submit">Upload</button>
+    </form>
+  </section>
+
+  <section class="notes-section">
+    <h3>Notes</h3>
+
+    <form method="post" action="/cases/{{ case.id }}/notes/add" class="note-form">
+      <textarea name="content" rows="2" placeholder="Add a note..."></textarea>
+      <button class="btn" type="submit">Add Note</button>
+    </form>
+
+    <ul class="notes-list">
+    {% if notes %}
+      {% for n in notes %}
+        <li>
+          {% if n.created_at is defined and n.created_at %}
+            <small class="note-date">
+              {{ n.created_at.strftime("%m/%d/%Y %I:%M %p")
+                 if n.created_at.__class__.__name__ in ["datetime", "date"]
+                 else n.created_at }}
+            </small>
+          {% endif %}
+
+          <span class="note-text">
+            {% if n.content is defined or n.text is defined or n.body is defined %}
+              {{ n.content or n.text or n.body }}
+            {% else %}
+              {{ n }}
+            {% endif %}
+          </span>
+        </li>
+      {% endfor %}
+    {% else %}
+      <li><em>No notes yet.</em></li>
+    {% endif %}
+    </ul>
+  </section>
+</div>
+
+{% include "cases/_case_overview_lien_modal.html" %}
+
+</div> {# end tab-overview #}

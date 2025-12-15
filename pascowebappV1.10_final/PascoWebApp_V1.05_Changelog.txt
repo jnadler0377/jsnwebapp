@@ -1,0 +1,45 @@
+Pasco Web App — Version 1.05 (November 2025)
+Status: Active Production Build
+Archived Versions: v1.00 → v1.03
+
+------------------------------------------------------------
+Major Additions
+------------------------------------------------------------
+- Checkbox Selection + Bulk Actions
+  • Added case-selection checkboxes on cases_list.html.
+  • New Export to CSV and Archive Selected buttons.
+  • CSV export now correctly pulls checked rows only.
+
+- Pagination & Display
+  • Page-count and navigation buttons reduced by ≈ 50% in size.
+  • Font size on case list reduced to ~75% for compact layout.
+  • Address formatting switched to Title Case for readability.
+
+- UI Refinements
+  • Address moved directly under the case number in details view.
+  • “Address (Override)” → “Address” label change.
+  • “Edit Address Override” → “Edit” button label.
+  • “Open in Property Appraiser,” “Style,” “Division,” and “Judge” removed for a cleaner display.
+  • File-upload blocks (“Verified Complaint,” “Value Calculation,” “Mortgage”) now appear as single-line items.
+
+- Internal Behavior Fixes
+  • Export CSV no longer triggers the “Update Cases” routine.
+  • Archive function now removes cases from the visible list immediately.
+  • Spinner state corrected so “Update Cases” and “Export CSV” act independently.
+  • Logging expanded in main.py for error tracing (debug_update_cases.log).
+
+------------------------------------------------------------
+Backend & Code Adjustments
+------------------------------------------------------------
+- Consolidated logging configuration.
+- Added asyncio event-loop patch for Windows compatibility.
+- Refactored FastAPI routes for file upload endpoints to avoid {"detail": "Not Found"} errors.
+- Pagination, filtering, and database queries optimized for SQLite (foreclosure.db).
+
+------------------------------------------------------------
+Next Planned Updates (v1.06 target)
+------------------------------------------------------------
+- Add bulk-note entry and multi-case tagging.
+- Include download CSV of archived cases.
+- Optional user-auth or session persistence for multi-user environments.
+- UI polish: progress bar styling, consistent font sizing, dark-mode option.

@@ -1,0 +1,24 @@
+{# app/templates/cases/_case_liens_numbers.html #}
+
+<div id="outstanding-liens" class="liens-panel">
+  <div class="liens-header-row">
+    <div class="liens-header">Outstanding Liens</div>
+    <a id="lien-modal-open" class="lien-link">Add Lien</a>
+  </div>
+  <div id="liens-list" class="liens-list"></div>
+  <div id="liens-saving" class="liens-saving" style="display:none;">Saving…</div>
+</div>
+
+<section class="numbers-section">
+  <h3>Numbers</h3>
+  <form method="post" action="/cases/{{ case.id }}/update">
+    <label>ARV</label>
+    <input type="number" step="0.01" name="arv" value="{{ arv }}">
+    <label>Rehab</label>
+    <input type="number" step="0.01" name="rehab" value="{{ rehab }}">
+    <label>Closing Costs</label>
+    <input type="number" step="0.01" name="closing_costs" value="{{ closing }}">
+    <p><strong>JSN Max Offer:</strong> {{ jsn_max_offer | currency }}</p>
+    <button class="btn" type="submit">Save</button>
+  </form>
+</section>

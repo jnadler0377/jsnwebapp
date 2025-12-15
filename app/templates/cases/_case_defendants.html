@@ -1,0 +1,15 @@
+<section class="defendants-section">
+  <h3>Defendants</h3>
+  {% if case.defendants and case.defendants|length %}
+    <ul>
+      {% for d in case.defendants %}
+        {% set name = (d.name or '')|string %}
+        {% if name and name|lower != 'nan' %}
+          <li>{{ name }}</li>
+        {% endif %}
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>No defendants recorded.</p>
+  {% endif %}
+</section>

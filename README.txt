@@ -9,3 +9,9 @@ Pasco Foreclosure Manager — Quickstart
    uvicorn app.main:app --reload --port 8000
 5) Open http://127.0.0.1:8000
 6) Go to "Import CSV" and upload pasco_foreclosures.csv from your scraper.
+
+
+
+
+python -m uvicorn app.main:app --reload --port 8000
+batchdata.io API Key: SJZDS94YHjR95liQxePQmiEN7cwo3rUpXFgQDt7K

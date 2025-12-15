@@ -1,0 +1,34 @@
+<section class="notes-section">
+  <h3>Notes</h3>
+
+  <form method="post" action="/cases/{{ case.id }}/notes/add" class="note-form">
+    <textarea name="content" rows="2" placeholder="Add a note..."></textarea>
+    <button class="btn" type="submit">Add Note</button>
+  </form>
+
+  <ul class="notes-list">
+  {% if notes %}
+    {% for n in notes %}
+      <li>
+        {% if n.created_at is defined and n.created_at %}
+          <small class="note-date">
+            {{ n.created_at.strftime("%m/%d/%Y %I:%M %p")
+               if n.created_at.__class__.__name__ in ["datetime", "date"]
+               else n.created_at }}
+          </small>
+        {% endif %}
+
+        <span class="note-text">
+          {% if n.content is defined or n.text is defined or n.body is defined %}
+            {{ n.content or n.text or n.body }}
+          {% else %}
+            {{ n }}
+          {% endif %}
+        </span>
+      </li>
+    {% endfor %}
+  {% else %}
+    <li><em>No notes yet.</em></li>
+  {% endif %}
+  </ul>
+</section>

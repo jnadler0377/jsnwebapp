@@ -1,0 +1,410 @@
+*** a/app/models.py
+--- b/app/models.py
+@@
+-from sqlalchemy import Column, Integer, String, Float, ForeignKey, Text
++from sqlalchemy import Column, Integer, String, Float, ForeignKey, Text
+ from sqlalchemy.orm import relationship
+ from .database import Base
+
+ class Case(Base):
+     __tablename__ = "cases"
+     id = Column(Integer, primary_key=True, index=True)
+     case_number = Column(String, unique=True, index=True, nullable=False)
+     filing_datetime = Column(String, default="")
+     style = Column(String, default="")
+     division = Column(String, default="")
+     judge = Column(String, default="")
+     parcel_id = Column(String, default="")
+     address = Column(String, default="")
+     subscriber_case_link = Column(String, default="")
++    # Optional user-entered enrichment fields
++    address_override = Column(String, default="")
++    # Offer calculator inputs/outputs
++    arv = Column(Float, default=0.0)
++    rehab_estimate = Column(Float, default=0.0)
++    closing_costs = Column(Float, default=0.0)
++    offer_70 = Column(Float, default=0.0)
+@@
+ class Defendant(Base):
+     __tablename__ = "defendants"
+     id = Column(Integer, primary_key=True, index=True)
+     case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"))
+     name = Column(String, default="")
+     case = relationship("Case", back_populates="defendants")
+
+ class Docket(Base):
+     __tablename__ = "dockets"
+     id = Column(Integer, primary_key=True, index=True)
+     case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"))
+     docket_datetime = Column(String, default="")
+     docket_text = Column(Text, default="")
+     link = Column(String, default="")
+     case = relationship("Case", back_populates="dockets")
+*** a/app/main.py
+--- b/app/main.py
+@@
+-from fastapi import FastAPI, Request, Depends, UploadFile, File, Form
+-from fastapi.responses import HTMLResponse, RedirectResponse
+-from fastapi.staticfiles import StaticFiles
+-from fastapi.templating import Jinja2Templates
+-from sqlalchemy.orm import Session
+-from typing import Optional
+-import pandas as pd
+-import os, shutil
+-
+-from .database import Base, engine, SessionLocal
+-from .models import Case, Defendant, Docket
+-from .utils import ensure_case_folder, compute_offer_70
+-
+-app = FastAPI(title="JSN Holdings Foreclosure Manager")
+-
+-# Static & uploads
+-...
++from fastapi import FastAPI, Request, Depends, UploadFile, File, Form, Query
++from fastapi.responses import HTMLResponse, RedirectResponse
++from fastapi.staticfiles import StaticFiles
++from fastapi.templating import Jinja2Templates
++from sqlalchemy.orm import Session
++from typing import Optional, List
++import pandas as pd
++import os, shutil, re
++
++from .database import Base, engine, SessionLocal
++from .models import Case, Defendant, Docket
++from .utils import ensure_case_folder, compute_offer_70
++
++app = FastAPI(title="JSN Holdings Foreclosure Manager")
++
++# ---- Static & Uploads -----------------------------------------------------
++from pathlib import Path
++BASE_DIR = Path(__file__).resolve().parent.parent  # root that contains 'app/'
++STATIC_DIR = BASE_DIR / "app" / "static"
++UPLOAD_ROOT = BASE_DIR / "uploads"
++UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
++
++app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
++app.mount("/uploads", StaticFiles(directory=str(UPLOAD_ROOT)), name="uploads")
++templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
++
++# ---- DB bootstrap & lightweight migration for new columns -----------------
++Base.metadata.create_all(bind=engine)
++from sqlalchemy import text
++def _ensure_column(table: str, column: str, type_sql: str, default_sql: str = "DEFAULT 0"):
++    with engine.begin() as conn:
++        cols = [r[1] for r in conn.execute(text(f"PRAGMA table_info({table})")).fetchall()]
++        if column not in cols:
++            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {type_sql} {default_sql}"))
++
++try:
++    _ensure_column("cases", "address_override", "TEXT", "DEFAULT ''")
++    _ensure_column("cases", "arv", "REAL")
++    _ensure_column("cases", "rehab_estimate", "REAL")
++    _ensure_column("cases", "closing_costs", "REAL")
++    _ensure_column("cases", "offer_70", "REAL")
++except Exception:
++    pass
++
++# ---- Utilities exposed to Jinja -------------------------------------------
++def parcel_url(parcel_id: str) -> Optional[str]:
++    \"\"\"
++    Convert a parcel id like '25-26-15-0060-00000-0470' to the Pasco appraiser search URL.
++    \"\"\"
++    if not parcel_id:
++        return None
++    m = re.match(r"^(\d{2})-(\d{2})-(\d{2})-(\d{4})-(\d{5})-(\d{4})$", parcel_id.strip())
++    if not m:
++        return None
++    sec, twn, rng, sbb, blk, lot = m.groups()
++    return f"https://search.pascopa.com/parcel.aspx?sec={sec}&twn={twn}&rng={rng}&sbb={sbb}&blk={blk}&lot={lot}&action=Submit"
++
++templates.env.globals["parcel_url"] = parcel_url
++
++# ---- Dependency ------------------------------------------------------------
++def get_db():
++    db = SessionLocal()
++    try:
++        yield db
++    finally:
++        db.close()
++
++# ---- Routes: Cases list with filters --------------------------------------
++@app.get("/cases", response_class=HTMLResponse)
++def cases_list(
++    request: Request,
++    q: Optional[str] = Query(None, description="Search across case #, style, address, parcel id"),
++    defendant: Optional[str] = Query(None),
++    filed_from: Optional[str] = Query(None, description="Inclusive YYYY-MM-DD"),
++    filed_to: Optional[str] = Query(None, description="Inclusive YYYY-MM-DD"),
++    has_docs: Optional[bool] = Query(False, description="Only cases with any uploaded docs"),
++    db: Session = Depends(get_db),
++):
++    query = db.query(Case)
++    if q:
++        like = f"%{q.strip()}%"
++        query = query.filter(
++            (Case.case_number.like(like)) |
++            (Case.style.like(like)) |
++            (Case.address.like(like)) |
++            (Case.address_override.like(like)) |
++            (Case.parcel_id.like(like))
++        )
++    if defendant:
++        d_like = f"%{defendant.strip()}%"
++        query = query.join(Defendant).filter(Defendant.name.like(d_like))
++    if filed_from:
++        query = query.filter(Case.filing_datetime >= filed_from)
++    if filed_to:
++        query = query.filter(Case.filing_datetime <= filed_to)
++    if has_docs:
++        query = query.filter(
++            (Case.verified_complaint_path != "") |
++            (Case.value_calc_path != "") |
++            (Case.mortgage_path != "")
++        )
++    cases = query.order_by(Case.filing_datetime.desc()).limit(500).all()
++    return templates.TemplateResponse("cases_list.html", {"request": request, "cases": cases})
++
++# ---- Route: Case detail update incl. parcel/address & offer calculator -----
++@app.post("/cases/{case_id}/update")
++async def update_case(
++    case_id: int,
++    parcel_id: Optional[str] = Form(None),
++    address_override: Optional[str] = Form(None),
++    arv: Optional[float] = Form(0.0),
++    rehab_estimate: Optional[float] = Form(0.0),
++    closing_costs: Optional[float] = Form(0.0),
++    db: Session = Depends(get_db),
++):
++    case = db.query(Case).filter(Case.id == case_id).first()
++    if not case:
++        return RedirectResponse("/cases", status_code=303)
++
++    if parcel_id is not None:
++        case.parcel_id = parcel_id.strip()
++    if address_override is not None:
++        case.address_override = address_override.strip()
++    try:
++        case.arv = float(arv or 0)
++        case.rehab_estimate = float(rehab_estimate or 0)
++        case.closing_costs = float(closing_costs or 0)
++        case.offer_70 = compute_offer_70(case.arv, case.rehab_estimate, case.closing_costs)
++    except Exception:
++        pass
++
++    db.commit()
++    return RedirectResponse(f"/cases/{case_id}", status_code=303)
++
++# ---- CSV Import UI ---------------------------------------------------------
++@app.get("/import", response_class=HTMLResponse)
++def import_get(request: Request):
++    return templates.TemplateResponse("import.html", {"request": request})
++
++@app.post("/import", response_class=HTMLResponse)
++async def import_post(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)):
++    import pandas as pd
++    df = pd.read_csv(file.file)
++    def get(df, names: List[str]):
++        cols = {c.lower(): c for c in df.columns}
++        for n in names:
++            if n.lower() in cols:
++                return cols[n.lower()]
++        return None
++    c_case = get(df, ["Case #", "Case#", "Case Number", "Case No"])
++    c_name = get(df, ["Case Name", "Style", "Case Style"])
++    c_file = get(df, ["Filing Date", "Filing", "Filed"])
++    def_cols = [get(df, [f"Defendant {i}", f"Def {i}", f"Defendant{i}"]) for i in range(1, 20)]
++    def_cols = [c for c in def_cols if c]
++
++    created = 0; updated = 0; added_defendants = 0
++    for _, row in df.iterrows():
++        case_number = str(row.get(c_case, "")).strip().replace("\\", "-").replace("/", "-")
++        if not case_number:
++            continue
++        style = str(row.get(c_name, "") or "").strip()
++        filing = str(row.get(c_file, "") or "").strip()
++        case = db.query(Case).filter(Case.case_number == case_number).first()
++        if not case:
++            case = Case(case_number=case_number, style=style, filing_datetime=filing)
++            db.add(case); db.flush(); created += 1
++        else:
++            ch = False
++            if style and not (case.style or "").strip(): case.style = style; ch = True
++            if filing and not (case.filing_datetime or "").strip(): case.filing_datetime = filing; ch = True
++            if ch: updated += 1
++        existing = { (d.name or "").strip().lower() for d in case.defendants }
++        for c in def_cols:
++            name = str(row.get(c, "") or "").strip()
++            if name and name.lower() not in existing:
++                db.add(Defendant(case_id=case.id, name=name)); added_defendants += 1
++    db.commit()
++    return templates.TemplateResponse("import.html", {"request": request, "message": f"Imported: {created} created, {updated} updated, {added_defendants} defendants added."})
+*** a/app/templates/base.html
+--- b/app/templates/base.html
+@@
+-  <link rel="stylesheet" href="/static/style.css">
++  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+*** a/app/templates/cases_list.html
+--- b/app/templates/cases_list.html
+@@
+-{% extends "base.html" %}
+-{% block content %}
+-<h2>Cases</h2>
+-<ul>
+-{% for c in cases %}
+-  <li><a href="/cases/{{ c.id }}">{{ c.case_number }}</a> — {{ c.style }}</li>
+-{% endfor %}
+-</ul>
+-{% endblock %}
++{% extends "base.html" %}
++{% block content %}
++<h2>Cases</h2>
++<form method="get" class="filters">
++  <input type="text" name="q" value="{{ request.query_params.get('q','') }}" placeholder="Search case # / style / address / parcel">
++  <input type="text" name="defendant" value="{{ request.query_params.get('defendant','') }}" placeholder="Defendant">
++  <input type="date" name="filed_from" value="{{ request.query_params.get('filed_from','') }}">
++  <input type="date" name="filed_to" value="{{ request.query_params.get('filed_to','') }}">
++  <label class="inline"><input type="checkbox" name="has_docs" value="true" {% if request.query_params.get('has_docs') %}checked{% endif %}> Has docs</label>
++  <button class="btn" type="submit">Filter</button>
++  <a class="btn secondary" href="/cases">Reset</a>
++  <a class="btn" href="/import">Import CSV</a>
++</form>
++
++<table class="table">
++  <thead>
++    <tr>
++      <th>Filed</th>
++      <th>Case #</th>
++      <th>Style</th>
++      <th>Parcel</th>
++      <th>Offer (70%)</th>
++    </tr>
++  </thead>
++  <tbody>
++  {% for c in cases %}
++    <tr>
++      <td>{{ c.filing_datetime }}</td>
++      <td><a href="/cases/{{ c.id }}">{{ c.case_number }}</a></td>
++      <td>{{ c.style }}</td>
++      <td>
++        {% if c.parcel_id and parcel_url(c.parcel_id) %}
++          <a href="{{ parcel_url(c.parcel_id) }}" target="_blank">{{ c.parcel_id }}</a>
++        {% else %}
++          {{ c.parcel_id }}
++        {% endif %}
++      </td>
++      <td>{% if c.offer_70 %}${{ '%.0f'|format(c.offer_70) }}{% endif %}</td>
++    </tr>
++  {% endfor %}
++  </tbody>
++</table>
++{% endblock %}
+*** a/app/templates/case_detail.html
+--- b/app/templates/case_detail.html
+@@
+ {% extends "base.html" %}
+ {% block content %}
+ <h2>Case {{ case.case_number }}</h2>
+
+ <div class="grid">
+   <section>
+     <h3>Details</h3>
+     <p><strong>Filed:</strong> {{ case.filing_datetime }}</p>
+     <p><strong>Style:</strong> {{ case.style }}</p>
+
+-    <form method="post" action="/cases/{{ case.id }}/update">
+-      <label>Parcel ID
+-        <input name="parcel_id" value="{{ case.parcel_id or '' }}">
+-      </label>
+-      <label>Address override
+-        <input name="address_override" value="{{ case.address_override or '' }}">
+-      </label>
++    <form method="post" action="/cases/{{ case.id }}/update" class="stack">
++      <div class="row">
++        <label class="grow">Parcel ID
++          <input name="parcel_id" value="{{ case.parcel_id or '' }}" placeholder="25-26-15-0060-00000-0470">
++        </label>
++        <div class="pad-left">
++        {% if case.parcel_id and parcel_url(case.parcel_id) %}
++          <a class="btn" href="{{ parcel_url(case.parcel_id) }}" target="_blank">Open in Pasco Appraiser</a>
++        {% endif %}
++        </div>
++      </div>
++      <label>Address override
++        <input name="address_override" value="{{ case.address_override or '' }}" placeholder="Manual address if different">
++      </label>
++
++      <h4>Offer Calculator (70%)</h4>
++      <div class="row">
++        <label>ARV <input type="number" step="0.01" name="arv" value="{{ case.arv or 0 }}"></label>
++        <label>Rehab <input type="number" step="0.01" name="rehab_estimate" value="{{ case.rehab_estimate or 0 }}"></label>
++        <label>Closing <input type="number" step="0.01" name="closing_costs" value="{{ case.closing_costs or 0 }}"></label>
++      </div>
++      <p><strong>Offer (70% rule):</strong> {% if case.offer_70 %}${{ '%.0f'|format(case.offer_70) }}{% else %}-{% endif %}</p>
+       <button class="btn" type="submit">Save</button>
+     </form>
+@@
+   {% if case.verified_complaint_path %}
+-    <p><a href="/{{ case.verified_complaint_path }}" target="_blank">Verified Complaint</a></p>
++    <p><a href="{{ url_for('uploads', path=case.verified_complaint_path) }}" target="_blank">Verified Complaint</a></p>
+   {% endif %}
+@@
+   {% if case.value_calc_path %}
+-    <p><a href="/{{ case.value_calc_path }}" target="_blank">Value Calculation</a></p>
++    <p><a href="{{ url_for('uploads', path=case.value_calc_path) }}" target="_blank">Value Calculation</a></p>
+   {% endif %}
+@@
+   {% if case.mortgage_path %}
+-    <p><a href="/{{ case.mortgage_path }}" target="_blank">Mortgage</a></p>
++    <p><a href="{{ url_for('uploads', path=case.mortgage_path) }}" target="_blank">Mortgage</a></p>
+   {% endif %}
+@@
+   <h3>Defendants</h3>
+   <ul>
+     {% for d in case.defendants %}<li>{{ d.name }}</li>{% endfor %}
+   </ul>
+ {% endblock %}
+*** a/app/templates/import.html
+--- b/app/templates/import.html
+@@
+-{% extends "base.html" %}
+-{% block content %}
+-<h2>Import</h2>
+-<p>Upload your CSV here.</p>
+-<form method="post" enctype="multipart/form-data">
+-  <input type="file" name="file" accept=".csv">
+-  <button class="btn" type="submit">Import</button>
+-</form>
+-{% if message %}<p class="notice">{{ message }}</p>{% endif %}
+-{% endblock %}
++{% extends "base.html" %}
++{% block content %}
++<h2>Import Pasco CSV</h2>
++<p>Expected columns (case-insensitive): <code>Case #</code>, <code>Case Name</code>, <code>Filing Date</code>, <code>Defendant 1..N</code>.</p>
++<form method="post" enctype="multipart/form-data" class="stack">
++  <input type="file" name="file" accept=".csv" required>
++  <button class="btn" type="submit">Import</button>
++  <a class="btn secondary" href="/cases">Back to Cases</a>
++</form>
++{% if message %}<p class="notice">{{ message }}</p>{% endif %}
++{% endblock %}
+*** a/app/static/style.css
+--- b/app/static/style.css
+@@
+ body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 0; }
+ header, main { padding: 16px 20px; }
+ .btn { display:inline-block; padding:8px 12px; border-radius:8px; border:1px solid #ddd; text-decoration:none; background:#f5f5f5; }
+ .btn:hover { background:#eee; }
++.btn.secondary { background: #fff; }
+ .grid { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+ .grid .btn { margin-top: 8px; }
+ .table { width:100%; border-collapse: collapse; margin-top: 12px; }
+ .table th, .table td { border-bottom:1px solid #eee; padding:8px; text-align:left; }
+ .table th { background:#fafafa; }
++.filters { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin: 8px 0; }
++.filters input[type="text"] { width: 260px; }
++.inline { display:inline-flex; align-items:center; gap:6px; }
++.row { display:flex; gap:12px; align-items:flex-end; }
++.row .grow { flex:1; }
++.pad-left { padding-left: 8px; }
++.stack { display:flex; flex-direction:column; gap:12px; }
+ .notice { padding:8px 10px; background:#f1f8ff; border:1px solid #c8e1ff; border-radius:6px; }

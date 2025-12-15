@@ -1,0 +1,24 @@
+{# templates/_macros.html #}
+
+{% macro format_phone(num) %}
+  {%- set digits = (num or '') 
+      |replace('(', '') 
+      |replace(')', '') 
+      |replace('-', '') 
+      |replace(' ', '') 
+      |replace('.', '') 
+      |replace('+', '') -%}
+  {%- if digits|length == 10 -%}
+    ({{ digits[0:3] }}) {{ digits[3:6] }}-{{ digits[6:10] }}
+  {%- else -%}
+    {{ num }}
+  {%- endif -%}
+{% endmacro %}
+
+{% macro yn_icon(value) %}
+  {%- if value -%}
+    <span class="yn-icon yes">✓</span>
+  {%- else -%}
+    <span class="yn-icon no">✗</span>
+  {%- endif -%}
+{% endmacro %}

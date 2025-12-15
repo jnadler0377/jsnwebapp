@@ -1,0 +1,65 @@
+{# app/templates/cases/_case_overview.html #}
+
+{# Two-column wrapper: left = address + Street View, right = liens + numbers #}
+<div class="addr-photo-liens">
+  <div class="left-col">
+    <p class="address-line">
+      <strong>Address:</strong> {{ (case.address_override or case.address)|title }}
+    </p>
+    <a href="#" onclick="toggleAddressEdit(true); return false;">edit</a>
+
+    <div id="addressEdit" style="display:none; margin-top:0.5rem;">
+      <form method="post" action="/cases/{{ case.id }}/update">
+        <input type="text" name="address_override"
+               placeholder="...ss"
+               value="{{ (case.address_override or case.address)|title }}">
+        <button class="btn" type="submit">Save</button>
+        <button class="btn" type="button" onclick="toggleAddressEdit(false)">Cancel</button>
+      </form>
+    </div>
+
+    <p class="property-inline">
+      <strong>Parcel ID:</strong> {{ case.parcel_id or '—' }}
+      &nbsp;|&nbsp;
+      <strong>Filing Date:</strong> {{ case.filing_datetime or '—' }}
+      <a href="#" onclick="toggleParcelEdit(true); return false;"
+         class="inline-edit-link">edit</a>
+    </p>
+
+    <div id="parcelEdit" style="display:none; margin-top:0.5rem;">
+      <form method="post" action="/cases/{{ case.id }}/update">
+        <input type="text" name="parcel_id" placeholder="Parcel ID"
+               value="{{ case.parcel_id or '' }}">
+        <button class="btn" type="submit">Save</button>
+        <button class="btn" type="button" onclick="toggleParcelEdit(false)">Cancel</button>
+      </form>
+    </div>
+
+    {# Street View #}
+    {% set sv_addr = case.address_override or case.address %}
+    <div class="streetview-container">
+      {% if sv_addr %}
+        <img
+          src="{{ streetview_url(sv_addr) }}"
+          alt="Street View"
+          class="streetview-img"
+          onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"
+        >
+        <div class="streetview-placeholder" style="display:none;">No Street View</div>
+      {% else %}
+        <div class="streetview-placeholder">No Street View</div>
+      {% endif %}
+    </div>
+  </div>
+
+  {# >>> THIS is the right column that was missing / misplaced <<< #}
+  <div class="right-col">
+    {% include "cases/_case_liens_numbers.html" %}
+  </div>
+</div>
+
+{# Below the two-column header, keep the rest stacked full-width #}
+{% include "cases/_case_defendants.html" %}
+{% include "cases/_case_skiptrace.html" %}
+{% include "cases/_case_documents.html" %}
+{% include "cases/_case_notes.html" %}

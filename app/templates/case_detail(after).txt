@@ -1,0 +1,953 @@
+{% extends "base.html" %}
+{% block content %}
+
+{# ---------- Helper macros ---------- #}
+{% macro format_phone(num) %}
+  {%- set digits = (num or '') 
+      |replace('(', '') 
+      |replace(')', '') 
+      |replace('-', '') 
+      |replace(' ', '') 
+      |replace('.', '') 
+      |replace('+', '') -%}
+  {%- if digits|length == 10 -%}
+    ({{ digits[0:3] }}) {{ digits[3:6] }}-{{ digits[6:10] }}
+  {%- else -%}
+    {{ num }}
+  {%- endif -%}
+{% endmacro %}
+
+{% macro yn_icon(value) %}
+  {%- if value -%}
+    <span class="yn-icon yes">✓</span>
+  {%- else -%}
+    <span class="yn-icon no">✗</span>
+  {%- endif -%}
+{% endmacro %}
+
+{% set arv = case.arv or 0 %}
+{% set rehab = case.rehab or 0 %}
+{% set closing = case.closing_costs or 0 %}
+{% set jsn_max_offer = (arv - rehab - closing) * 0.7 %}
+
+<h2>Case {{ case.case_number }}</h2>
+<a class="btn" href="/cases/{{ case.id }}/report" target="_blank"
+   style="font-size:0.85em; padding:0.4em 0.7em;">
+  Deal Calculator
+</a>
+
+{% if not (skip_trace and skip_trace.results) %}
+<form method="post" action="/cases/{{ case.id }}/skip-trace" style="display:inline;">
+  <button class="btn" type="submit" style="font-size:0.85em; padding:0.4em 0.7em; margin-left:0.5rem;">
+    Skip Trace Owner
+  </button>
+</form>
+{% endif %}
+
+<div class="tabs">
+  <button type="button" class="tab-button tab-active" data-tab="overview">Case Overview</button>
+  <button type="button" class="tab-button" data-tab="property">Property Data</button>
+</div>
+
+<div id="tab-overview" class="tab-content tab-active">
+
+<!-- Two-column wrapper ONLY for address/photo (left) and Outstanding Liens (right) -->
+<div class="addr-photo-liens">
+  <div class="left-col">
+    <p class="address-line"><strong>Address:</strong> {{ (case.address_override or case.address)|title }}</p>
+    <a href="#" onclick="toggleAddressEdit(true); return false;">edit</a>
+    <div id="addressEdit" style="display:none; margin-top:0.5rem;">
+      <form method="post" action="/cases/{{ case.id }}/update">
+        <input type="text" name="address_override" placeholder="...ss" value="{{ (case.address_override or case.address)|title }}">
+        <button class="btn" type="submit">Save</button>
+        <button class="btn" type="button" onclick="toggleAddressEdit(false)">Cancel</button>
+      </form>
+    </div>
+
+    <p class="property-inline">
+      <strong>Parcel ID:</strong> {{ case.parcel_id or '—' }}
+      &nbsp;|&nbsp;
+      <strong>Filing Date:</strong> {{ case.filing_datetime or '—' }}
+      <a href="#" onclick="toggleParcelEdit(true); return false;" class="inline-edit-link">edit</a>
+    </p>
+    <div id="parcelEdit" style="display:none; margin-top:0.5rem;">
+      <form method="post" action="/cases/{{ case.id }}/update">
+        <input type="text" name="parcel_id" placeholder="Parcel ID" value="{{ case.parcel_id or '' }}">
+        <button class="btn" type="submit">Save</button>
+        <button class="btn" type="button" onclick="toggleParcelEdit(false)">Cancel</button>
+      </form>
+    </div>
+
+    <div class="streetview-container">
+      {% if case.address %}
+        <img
+          src="https://maps.googleapis.com/maps/api/streetview?size=480x320&location={{ case.address|urlencode }}&key={{ settings.google_streetview_api_key }}"
+          alt="Street View"
+          class="streetview-img"
+          onerror="this.style.display='none';"
+        >
+      {% else %}
+        <div class="streetview-placeholder">No Street View</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="right-col">
+    <div id="outstanding-liens" class="liens-panel">
+      <div class="liens-header-row">
+        <div class="liens-header">Outstanding Liens</div>
+        <a id="lien-modal-open" class="lien-link">Add Lien</a>
+      </div>
+      <div id="liens-list" class="liens-list"></div>
+      <div id="liens-saving" class="liens-saving" style="display:none;">Saving…</div>
+    </div>
+
+    <section class="numbers-section">
+      <h3>Numbers</h3>
+      <form method="post" action="/cases/{{ case.id }}/update">
+        <label>ARV</label>
+        <input type="number" step="0.01" name="arv" value="{{ arv }}">
+        <label>Rehab</label>
+        <input type="number" step="0.01" name="rehab" value="{{ rehab }}">
+        <label>Closing Costs</label>
+        <input type="number" step="0.01" name="closing_costs" value="{{ closing }}">
+        <p><strong>JSN Max Offer:</strong> {{ jsn_max_offer | currency }}</p>
+        <button class="btn" type="submit">Save</button>
+      </form>
+    </section>
+  </div>
+</div>
+
+<section class="defendants-section">
+  <h3>Defendants</h3>
+  <ul>
+    {% for d in case.defendants or [] %}
+      <li>{{ d.name }}</li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section class="skip-trace-section">
+  <h3>Skip Trace</h3>
+  {% if skip_trace_error %}
+    <p class="error-text">{{ skip_trace_error }}</p>
+  {% endif %}
+
+  {% if skip_trace and skip_trace.results %}
+    {% set res = skip_trace.results[0] if skip_trace.results[0] is defined else None %}
+    {% if res %}
+      <p><strong>Owner:</strong> {{ res.full_name or '—' }}</p>
+      <p><strong>Phones:</strong>
+        {% if res.phones %}
+          {% for ph in res.phones %}
+            {{ format_phone(ph.phone) }}
+            {% if ph.is_litigator %}(Litigator){% endif %}
+            {% if ph.is_dnc %}(DNC){% endif %}
+            {% if not loop.last %}, {% endif %}
+          {% endfor %}
+        {% else %}
+          —
+        {% endif %}
+      </p>
+      <p><strong>Emails:</strong>
+        {% if res.emails %}
+          {% for em in res.emails %}
+            {{ em.email }}{% if not loop.last %}, {% endif %}
+          {% endfor %}
+        {% else %}
+          —
+        {% endif %}
+      </p>
+      <p><strong>Mailing Address:</strong>
+        {% if res.mailing_address %}
+          {{ res.mailing_address.address1 }},
+          {{ res.mailing_address.city }},
+          {{ res.mailing_address.state }}
+          {{ res.mailing_address.postal_code }}
+        {% else %}
+          —
+        {% endif %}
+      </p>
+    {% else %}
+      <p>No skip trace data.</p>
+    {% endif %}
+  {% else %}
+    <p>No skip trace data. Use “Skip Trace Owner” to pull BatchData skip trace.</p>
+  {% endif %}
+</section>
+
+<section class="documents-section">
+  <h3>Documents</h3>
+  <ul>
+    {% for d in case.dockets or [] %}
+      <li>
+        <a href="{{ d.file_url or '#' }}" target="_blank">{{ d.description or d.file_name or 'Document' }}</a>
+      </li>
+    {% else %}
+      <li><em>No documents uploaded.</em></li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section class="notes-section">
+  <h3>Notes</h3>
+
+  <form method="post" action="/cases/{{ case.id }}/notes/add" class="note-form">
+    <textarea name="content" rows="2" placeholder="Add a note..."></textarea>
+    <button class="btn" type="submit">Add Note</button>
+  </form>
+
+  <ul class="notes-list">
+  {% if notes %}
+    {% for n in notes %}
+      <li>
+        {% if n.created_at is defined and n.created_at %}
+          <small class="note-date">
+            {{ n.created_at.strftime("%m/%d/%Y %I:%M %p")
+               if n.created_at.__class__.__name__ in ["datetime", "date"]
+               else n.created_at }}
+          </small>
+        {% endif %}
+
+        <span class="note-text">
+          {% if n.content is defined or n.text is defined or n.body is defined %}
+            {{ n.content or n.text or n.body }}
+          {% else %}
+            {{ n }}
+          {% endif %}
+        </span>
+      </li>
+    {% endfor %}
+  {% else %}
+    <li><em>No notes yet.</em></li>
+  {% endif %}
+</ul>
+
+</section>
+
+</div> {# end tab-overview #}
+
+<div id="tab-property" class="tab-content">
+  <section class="property-tab">
+    <h3>BatchData Property Profile</h3>
+
+    {% if property_error %}
+      <p class="property-error">{{ property_error }}</p>
+    {% endif %}
+
+    {% if property_data and property_data.get('results') and property_data['results'].get('properties') %}
+      {% set props = property_data['results']['properties'] %}
+      {% set p = props[0] %}
+
+      <div class="prop-grid">
+        <div class="prop-card">
+          <h4>Address &amp; Basic Info</h4>
+          <p>
+            <strong>Street:</strong>
+            {{ p.address.street if p.address is defined and p.address.street is defined }}
+          </p>
+          <p>
+            <strong>City/State:</strong>
+            {{ p.address.city if p.address is defined and p.address.city is defined }},
+            {{ p.address.state if p.address is defined and p.address.state is defined }}
+            {{ p.address.zip if p.address is defined and p.address.zip is defined }}
+          </p>
+          <p>
+            <strong>County:</strong>
+            {{ p.address.county if p.address is defined and p.address.county is defined }}
+            {% if p.address.countyFipsCode is defined %} (FIPS {{ p.address.countyFipsCode }}){% endif %}
+          </p>
+          <p>
+            <strong>Coordinates:</strong>
+            {% if p.address.latitude is defined and p.address.longitude is defined %}
+              {{ '%.6f'|format(p.address.latitude) }},
+              {{ '%.6f'|format(p.address.longitude) }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+          <p>
+            <strong>Property Type:</strong>
+            {{ p.general.propertyTypeCategory if p.general is defined and p.general.propertyTypeCategory is defined }}
+            {% if p.general.propertyTypeDetail is defined %}
+              – {{ p.general.propertyTypeDetail }}
+            {% endif %}
+          </p>
+          <p>
+            <strong>Lot Size:</strong>
+            {% if p.lot is defined and p.lot.lotSizeAcres is defined %}
+              {{ '%.2f'|format(p.lot.lotSizeAcres) }} acres
+            {% elif p.lot is defined and p.lot.lotSizeSquareFeet is defined %}
+              {{ '{:,.0f}'.format(p.lot.lotSizeSquareFeet) }} sq ft
+            {% else %}
+              —
+            {% endif %}
+          </p>
+        </div>
+
+        <div class="prop-card">
+          <h4>Assessment &amp; Taxes</h4>
+          <p>
+            <strong>Market Value:</strong>
+            {% if p.valuation is defined and p.valuation.estimatedValue is defined %}
+              ${{ '{:,.0f}'.format(p.valuation.estimatedValue) }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+          <p>
+            <strong>Market Value Range:</strong>
+            {% if p.valuation is defined and p.valuation.priceRangeMin is defined and p.valuation.priceRangeMax is defined %}
+              ${{ '{:,.0f}'.format(p.valuation.priceRangeMin) }}
+              – ${{ '{:,.0f}'.format(p.valuation.priceRangeMax) }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+          <p>
+            <strong>Confidence Score:</strong>
+            {% if p.valuation is defined and p.valuation.confidenceScore is defined %}
+              {{ p.valuation.confidenceScore }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+          <p>
+            <strong>Assessed (Land / Improvements / Total):</strong><br>
+            {% if p.assessment is defined %}
+              {% set land = p.assessment.landMarketValue if p.assessment.landMarketValue is defined else None %}
+              {% set imp = p.assessment.improvementMarketValue if p.assessment.improvementMarketValue is defined else None %}
+              {% set tot = p.assessment.totalMarketValue if p.assessment.totalMarketValue is defined else None %}
+              {% if land or imp or tot %}
+                Land:
+                {% if land is not none %}${{ '{:,.0f}'.format(land) }}{% else %}—{% endif %} /
+                Impr:
+                {% if imp is not none %}${{ '{:,.0f}'.format(imp) }}{% else %}—{% endif %} /
+                Total:
+                {% if tot is not none %}${{ '{:,.0f}'.format(tot) }}{% else %}—{% endif %}
+              {% else %}
+                —
+              {% endif %}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+          <p>
+            <strong>Tax:</strong>
+            {% if p.tax is defined and p.tax.taxAmount is defined %}
+              ${{ '{:,.0f}'.format(p.tax.taxAmount) }}
+              {% if p.tax.taxYear is defined %}(Tax Year {{ p.tax.taxYear }}){% endif %}
+              {% if p.tax.taxDelinquentYear is defined %}<span class="pill pill-warn">Delinquent {{ p.tax.taxDelinquentYear }}</span>{% endif %}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+        </div>
+
+        <div class="prop-card">
+          <h4>Open Liens &amp; Mortgages</h4>
+          {% if p.openLien is defined %}
+            <p>
+              <strong>Total Open Liens:</strong>
+              {% if p.openLien.totalOpenLienBalance is defined %}
+                ${{ '{:,.0f}'.format(p.openLien.totalOpenLienBalance) }}
+                {% if p.openLien.totalOpenLienCount is defined %} ({{ p.openLien.totalOpenLienCount }} loans){% endif %}
+              {% else %}
+                —
+              {% endif %}
+            </p>
+            <p>
+              <strong>Loan Types:</strong>
+              {% if p.openLien.allLoanTypes is defined and p.openLien.allLoanTypes %}
+                {{ p.openLien.allLoanTypes|join(', ') }}
+              {% else %}
+                —
+              {% endif %}
+            </p>
+            <p>
+              <strong>First / Last Loan Recorded:</strong>
+              {% if p.openLien.firstLoanRecordingDate is defined or p.openLien.lastLoanRecordingDate is defined %}
+                {{ p.openLien.firstLoanRecordingDate or '—' }} → {{ p.openLien.lastLoanRecordingDate or '—' }}
+              {% else %}
+                —
+              {% endif %}
+            </p>
+          {% else %}
+            <p>—</p>
+          {% endif %}
+
+          {% if p.mortgageHistory is defined and p.mortgageHistory %}
+            <p><strong>Recent Mortgages:</strong></p>
+            <ul class="prop-list">
+              {% for m in p.mortgageHistory[:3] %}
+                <li>
+                  {% if m.lenderName is defined %}<strong>{{ m.lenderName }}</strong>{% endif %}
+                  {% if m.loanAmount is defined %} – ${{ '{:,.0f}'.format(m.loanAmount) }}{% endif %}
+                  {% if m.recordingDate is defined %} (Rec. {{ m.recordingDate[:10] }}){% endif %}
+                </li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+        </div>
+
+        <div class="prop-card">
+          <h4>Owner &amp; Quick Flags</h4>
+          <p>
+            <strong>Owner:</strong>
+            {% if p.owner is defined and p.owner.fullName is defined %}
+              {{ p.owner.fullName }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+          <p>
+            <strong>Mailing Address:</strong><br>
+            {% if p.owner is defined and p.owner.mailingAddress is defined %}
+              {{ p.owner.mailingAddress.street }},
+              {{ p.owner.mailingAddress.city }},
+              {{ p.owner.mailingAddress.state }}
+              {{ p.owner.mailingAddress.zip }}
+            {% else %}
+              —
+            {% endif %}
+          </p>
+
+          {% if p.quickLists is defined %}
+            {% set tags = [] %}
+            {% if p.quickLists.highEquity %}{% set _ = tags.append('High Equity') %}{% endif %}
+            {% if p.quickLists.freeAndClear %}{% set _ = tags.append('Free & Clear') %}{% endif %}
+            {% if p.quickLists.ownerOccupied %}{% set _ = tags.append('Owner Occupied') %}{% endif %}
+            {% if p.quickLists.absenteeOwner %}{% set _ = tags.append('Absentee Owner') %}{% endif %}
+            {% if p.quickLists.preforeclosure %}{% set _ = tags.append('Pre-foreclosure') %}{% endif %}
+            {% if p.quickLists.taxDefault %}{% set _ = tags.append('Tax Default') %}{% endif %}
+            {% if p.quickLists.vacant %}{% set _ = tags.append('Vacant') %}{% endif %}
+            {% if p.quickLists.hasHoa %}{% set _ = tags.append('Has HOA') %}{% endif %}
+
+            {% if tags %}
+              <p><strong>Quick Flags:</strong></p>
+              <p>
+                {% for t in tags %}
+                  <span class="pill pill-tag">{{ t }}</span>
+                {% endfor %}
+              </p>
+            {% endif %}
+          {% endif %}
+
+          {% if p.meta is defined %}
+            <p>
+              <strong>Last Updated:</strong>
+              {% if p.meta.propertyDateModified is defined %}
+                {{ p.meta.propertyDateModified[:10] }}
+              {% else %}
+                —
+              {% endif %}
+            </p>
+          {% endif %}
+        </div>
+      </div>
+
+    {% else %}
+      <p>No property data stored yet. Use the “Property Lookup” action to pull a full profile from BatchData.</p>
+    {% endif %}
+  </section>
+</div>
+
+<script>
+function toggleParcelEdit(show) {
+  document.getElementById('parcelEdit').style.display = show ? '' : 'none';
+}
+function toggleAddressEdit(show) {
+  document.getElementById('addressEdit').style.display = show ? '' : 'none';
+}
+
+// ---- Outstanding Liens JS (existing) ----
+(function() {
+  const caseId = {{ case.id }};
+  const listEl = document.getElementById('liens-list');
+  const savingEl = document.getElementById('liens-saving');
+  const openBtn = document.getElementById('lien-modal-open');
+  const modal = document.getElementById('lienModal');
+  const form = document.getElementById('lienModalForm');
+  const holderInput = document.getElementById('lienHolder');
+  const amountInput = document.getElementById('lienAmount');
+  const indexInput = document.getElementById('lienIndex');
+  const closeBtn = document.getElementById('lienModalClose');
+  const cancelBtn = document.getElementById('lienModalCancel');
+
+  let liens = [];
+
+  function formatCurrency(val) {
+    let s = String(val ?? '').replace(/[^\d.]/g, '');
+    if (!s) return '$0.00';
+    const num = parseFloat(s);
+    if (isNaN(num)) return '$0.00';
+    return num.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+  }
+
+  function render() {
+    if (!listEl) return;
+    listEl.innerHTML = '';
+    if (!liens.length) {
+      const empty = document.createElement('div');
+      empty.className = 'liens-empty-hint';
+      empty.textContent = 'No liens added yet.';
+      listEl.appendChild(empty);
+      return;
+    }
+    liens.forEach((lien, idx) => {
+      const row = document.createElement('div');
+      row.className = 'lien-row';
+
+      const left = document.createElement('div');
+      left.className = 'lien-left';
+      left.textContent = lien.holder + ' – ' + formatCurrency(lien.amount);
+
+      const right = document.createElement('div');
+      right.className = 'lien-actions';
+
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.className = 'btn-secondary';
+      editBtn.textContent = 'Edit';
+      editBtn.onclick = () => openModal(idx);
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'btn-danger';
+      delBtn.textContent = 'Delete';
+      delBtn.onclick = () => deleteLien(idx);
+
+      right.appendChild(editBtn);
+      right.appendChild(delBtn);
+      row.appendChild(left);
+      row.appendChild(right);
+      listEl.appendChild(row);
+    });
+
+    // Update summary numbers on the fly
+    updateSummaryFromLiens();
+  }
+
+  function setSaving(isSaving) {
+    if (!savingEl) return;
+    savingEl.style.display = isSaving ? 'block' : 'none';
+  }
+
+  async function load() {
+    try {
+      const resp = await fetch(`/api/cases/${caseId}/liens`);
+      if (!resp.ok) throw new Error('Failed to load liens');
+      const data = await resp.json();
+      liens = Array.isArray(data) ? data : [];
+      render();
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      const resp = await fetch(`/api/cases/${caseId}/liens`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(liens),
+      });
+      if (!resp.ok) throw new Error('Failed to save liens');
+      // No need to reload if we trust local state
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function openModal(index) {
+    if (!modal) return;
+    indexInput.value = (index != null && index >= 0) ? String(index) : '';
+    if (index != null && index >= 0 && liens[index]) {
+      holderInput.value = liens[index].holder || '';
+      amountInput.value = liens[index].amount || '';
+    } else {
+      holderInput.value = '';
+      amountInput.value = '';
+    }
+    modal.style.display = 'block';
+  }
+
+  function closeModal() {
+    if (!modal) return;
+    modal.style.display = 'none';
+  }
+
+  function deleteLien(index) {
+    if (index < 0 || index >= liens.length) return;
+    liens.splice(index, 1);
+    render();
+    save();
+  }
+
+  if (openBtn && modal && holderInput && amountInput && indexInput && form) {
+    openBtn.addEventListener('click', () => openModal(null));
+    closeBtn && closeBtn.addEventListener('click', closeModal);
+    cancelBtn && cancelBtn.addEventListener('click', closeModal);
+
+    form.addEventListener('submit', (evt) => {
+      evt.preventDefault();
+      const holder = holderInput.value.trim();
+      const amountRaw = (amountInput.value || amountInput.value || '').trim();
+      const amount = formatCurrency(amountRaw);
+
+      const idx = indexInput.value ? parseInt(indexInput.value, 10) : -1;
+
+      if (idx >= 0 && idx < liens.length) {
+        if (!holder) {
+          liens.splice(idx, 1);
+        } else {
+          liens[idx] = { holder, amount };
+        }
+      } else {
+        if (holder) {
+          liens.push({ holder, amount });
+        }
+      }
+      modal.style.display = 'none';
+      save();
+      render();
+    });
+
+    window.addEventListener('click', (evt) => {
+      if (evt.target === modal) {
+        closeModal();
+      }
+    });
+  }
+
+  function updateSummaryFromLiens() {
+    const totalEl = document.getElementById('summary-liens-total');
+    const sellerEl = document.getElementById('summary-seller-cash');
+    const offerRawEl = document.getElementById('summary-jsn-offer-raw');
+
+    if (!totalEl && !sellerEl) return;
+
+    let total = 0;
+    if (Array.isArray(liens)) {
+      liens.forEach(l => {
+        const raw = (l.amount || '').toString().replace(/[^\d.]/g, '');
+        const num = parseFloat(raw);
+        if (!isNaN(num)) total += num;
+      });
+    }
+
+    const arv = {{ arv|float }};
+    const rehab = {{ rehab|float }};
+    const closingLocal = {{ closing|float }};
+    const jsnOffer = (arv - rehab - closingLocal) * 0.7;
+    const sellerCash = jsnOffer - total;
+
+    if (totalEl) totalEl.textContent = total.toLocaleString('en-US', { style:'currency', currency:'USD' });
+    if (offerRawEl) offerRawEl.textContent = jsnOffer.toLocaleString('en-US', { style:'currency', currency:'USD' });
+    if (sellerEl) sellerEl.textContent = sellerCash.toLocaleString('en-US', { style:'currency', currency:'USD' });
+  }
+
+  load();
+})();
+
+  // Tab switching for Case Overview / Property Data
+  (function () {
+    const tabButtons = document.querySelectorAll('.tab-button');
+    const tabPanels = document.querySelectorAll('.tab-content');
+    if (!tabButtons.length || !tabPanels.length) return;
+
+    tabButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        const tab = btn.getAttribute('data-tab');
+        tabButtons.forEach(b => b.classList.remove('tab-active'));
+        tabPanels.forEach(p => p.classList.remove('tab-active'));
+        btn.classList.add('tab-active');
+        const panel = document.getElementById('tab-' + tab);
+        if (panel) {
+          panel.classList.add('tab-active');
+        }
+      });
+    });
+  })();
+</script>
+
+<style>
+/* Layout */
+.addr-photo-liens {
+  display:flex;
+  gap:1.5rem;
+  margin:1rem 0 1.5rem;
+}
+.addr-photo-liens .left-col {
+  flex: 1.2;
+  min-width: 0;
+}
+.addr-photo-liens .right-col {
+  flex: 1;
+  min-width: 260px;
+}
+
+.address-line {
+  font-size:1.05rem;
+  font-weight:600;
+}
+.inline-edit-link {
+  margin-left:0.5rem;
+  font-size:0.85rem;
+  opacity:0.8;
+}
+
+.streetview-container {
+  margin-top:0.75rem;
+  border-radius:10px;
+  overflow:hidden;
+  background:#111;
+  min-height:150px;
+}
+.streetview-img {
+  width:100%;
+  height:auto;
+  display:block;
+}
+.streetview-placeholder {
+  padding:1.5rem;
+  text-align:center;
+  opacity:0.7;
+}
+
+/* Liens + numbers */
+.liens-panel {
+  background:#141414;
+  border-radius:10px;
+  padding:0.75rem 1rem;
+  margin-bottom:1rem;
+  border:1px solid #2c2c2c;
+}
+.liens-header-row {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  margin-bottom:0.5rem;
+}
+.liens-header {
+  font-weight:600;
+}
+.lien-link {
+  font-size:0.85rem;
+  cursor:pointer;
+  color:#6ab0ff;
+}
+
+.liens-list {
+  font-size:0.9rem;
+}
+.lien-row {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:0.25rem 0;
+  border-bottom:1px solid #222;
+}
+.lien-row:last-child {
+  border-bottom:none;
+}
+.lien-left { flex:1; }
+.lien-actions {
+  display:flex;
+  gap:0.25rem;
+}
+.btn-secondary, .btn-danger {
+  font-size:0.75rem;
+  padding:0.2rem 0.45rem;
+  border-radius:4px;
+  border:none;
+  cursor:pointer;
+}
+.btn-secondary { background:#333; color:#eee; }
+.btn-danger { background:#5b1c1c; color:#ffdede; }
+
+.liens-saving {
+  margin-top:0.4rem;
+  font-size:0.8rem;
+  opacity:0.75;
+}
+
+/* Numbers card */
+.numbers-section {
+  background:#141414;
+  border-radius:10px;
+  padding:0.75rem 1rem 1rem;
+  border:1px solid #2c2c2c;
+}
+.numbers-section h3 {
+  margin-top:0;
+}
+.numbers-section label {
+  display:block;
+  margin-top:0.4rem;
+  font-size:0.85rem;
+}
+.numbers-section input {
+  width:100%;
+  margin-top:0.15rem;
+}
+
+/* Sections */
+.defendants-section,
+.skip-trace-section,
+.documents-section,
+.notes-section {
+  margin-top:1.5rem;
+}
+
+.notes-list {
+  list-style:none;
+  padding-left:0;
+}
+.notes-list li {
+  padding:0.35rem 0;
+  border-bottom:1px solid #222;
+}
+.note-date {
+  font-size:0.75rem;
+  opacity:0.65;
+  margin-right:0.5rem;
+}
+.note-text {
+  font-size:0.9rem;
+}
+
+/* Skip trace icons */
+.yn-icon {
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:1.1em;
+  height:1.1em;
+  border-radius:50%;
+  font-size:0.8em;
+  margin-right:0.15rem;
+}
+.yn-icon.yes {
+  background:#1f3d2e;
+  color:#a6f3c5;
+}
+.yn-icon.no {
+  background:#412222;
+  color:#ffb3b3;
+}
+.error-text {
+  color:#ff8080;
+}
+
+/* Tabs for Case / Property views */
+.tabs {
+  margin-top: 0.5rem;
+  margin-bottom: 1rem;
+  display: flex;
+  gap: 0.5rem;
+}
+.tab-button {
+  border: 1px solid #444;
+  background: #101010;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.85em;
+  border-radius: 6px 6px 0 0;
+  cursor: pointer;
+}
+.tab-button.tab-active {
+  background: #181818;
+  border-bottom-color: #181818;
+  font-weight: 600;
+}
+.tab-content {
+  display: none;
+}
+.tab-content.tab-active {
+  display: block;
+}
+
+.property-tab {
+  margin-top: 0.25rem;
+}
+
+.prop-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  align-items: flex-start;
+}
+.prop-card {
+  background: #101010;
+  border-radius: 10px;
+  padding: 0.75rem 1rem;
+  border: 1px solid #2a2a2a;
+  font-size: 0.9em;
+}
+.prop-card h4 {
+  margin-top: 0;
+  margin-bottom: 0.35rem;
+  font-size: 1em;
+}
+.prop-card p {
+  margin: 0.25rem 0;
+}
+
+.prop-list {
+  margin: 0.25rem 0 0;
+  padding-left: 1.1rem;
+}
+.prop-list li {
+  margin-bottom: 0.15rem;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.75em;
+  margin-right: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+.pill-tag {
+  background: #1f3d2e;
+  color: #a6f3c5;
+}
+.pill-warn {
+  background: #412222;
+  color: #ffb3b3;
+}
+
+.property-error {
+  color: #ff8080;
+  font-size: 0.9em;
+  margin-bottom: 0.5rem;
+}
+
+/* Modal styling: dimmed overlay behind the white card */
+.modal-backdrop {
+  position:fixed; inset:0; background:rgba(0,0,0,0.65);
+  display:none; z-index:9999;
+}
+
+/* Modal styling: white background, black text */
+.modal-card {
+  position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+  background:#fff; color:#000; padding:1rem; width:min(560px,90vw); border-radius:10px;
+}
+.lien-form-grid { display:grid; grid-template-columns: 1fr 180px; gap:.75rem; align-items:end; }
+.lien-label { display:block; font-size:.9rem; opacity:.8; color:#000; }
+.lien-field {
+  width:100%; background:#fff; color:#000; border:1px solid #ccc; border-radius:6px;
+  padding:.5rem .6rem; outline:none;
+}
+.lien-field::placeholder { color:#333; }
+
+.liens-empty-hint { opacity: 0.65; font-style: italic; }
+.modal-actions { margin-top:0.75rem; display:flex; gap:0.5rem; justify-content:flex-end; }
+</style>
+{% endblock %}

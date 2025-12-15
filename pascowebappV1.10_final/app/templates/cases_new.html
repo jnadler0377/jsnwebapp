@@ -1,0 +1,83 @@
+
+{% extends "base.html" %}
+{% block content %}
+<h2>Add New Case</h2>
+
+<style>
+  .form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 20px;
+    max-width: 900px;
+  }
+  .form-grid label { font-weight: 600; }
+  .form-actions { margin-top: 16px; display:flex; gap:10px; }
+  .error { background:#fee2e2; color:#7f1d1d; padding:10px 12px; border-radius:8px; margin-bottom:12px; }
+  .muted { color:#666; font-size:12px; }
+  input[type="text"], input[type="date"], input[type="number"], textarea {
+    width: 100%; padding: 8px 10px; border:1px solid #cbd5e1; border-radius:8px;
+  }
+  textarea { min-height: 80px; }
+</style>
+
+{% if error %}
+  <div class="error">{{ error }}</div>
+{% endif %}
+
+<form action="/cases/create" method="post">
+  <div class="form-grid">
+    <div>
+      <label>Case # *</label>
+      <input type="text" name="case_number" required placeholder="e.g., 51-2025-CA-001234-ES">
+    </div>
+
+    <div>
+      <label>Filing Date</label>
+      <input type="date" name="filing_date">
+      <div class="muted">Optional. If empty, will be left blank.</div>
+    </div>
+
+    <div>
+      <label>Style / Case Name</label>
+      <input type="text" name="style" placeholder="Plaintiff v. Defendant">
+    </div>
+
+    <div>
+      <label>Parcel ID</label>
+      <input type="text" name="parcel_id" placeholder="33-24-16-0260-00000-2540">
+    </div>
+
+    <div>
+      <label>Address (override)</label>
+      <input type="text" name="address_override" placeholder="123 Main St, Hudson, FL 34667">
+    </div>
+
+    <div>
+      <label>ARV</label>
+      <input type="number" inputmode="decimal" name="arv" step="0.01" min="0" placeholder="0.00">
+    </div>
+
+    <div>
+      <label>Rehab</label>
+      <input type="number" inputmode="decimal" name="rehab" step="0.01" min="0" placeholder="0.00">
+    </div>
+
+    <div>
+      <label>Closing Costs</label>
+      <input type="number" inputmode="decimal" name="closing_costs" step="0.01" min="0" placeholder="0.00">
+    </div>
+
+    <div style="grid-column: 1 / -1;">
+      <label>Defendants (one per line or comma-separated)</label>
+      <textarea name="defendants_csv" placeholder="John A. Smith
+Jane Q. Doe"></textarea>
+    </div>
+  </div>
+
+  <div class="form-actions">
+    <button type="submit">Create Case</button>
+    <a class="btn" href="/cases">Cancel</a>
+  </div>
+</form>
+
+{% endblock %}

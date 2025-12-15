@@ -21,10 +21,8 @@ import uuid
 import io, json
 from pathlib import Path
 from typing import List, Optional
-from PyPDF2 import PdfReader, PdfWriter
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
 from tools.import_pasco_csv import main as import_pasco_csv_main
+import requests  # for BatchData skip trace calls
 
 # ---------------- FastAPI / Responses ----------------
 from fastapi import (
@@ -43,7 +41,7 @@ from fastapi.templating import Jinja2Templates
 
 # ---------------- DB / ORM ----------------
 from sqlalchemy.orm import Session
-from sqlalchemy import inspect, text, bindparam  # add text, bindparam
+from sqlalchemy import inspect, text, bindparam
 from sqlalchemy.exc import OperationalError
 
 # ---------------- App imports ----------------
@@ -52,7 +50,34 @@ from app.settings import settings
 from .database import Base, engine, SessionLocal
 from .models import Case, Defendant, Docket, Note
 from .utils import ensure_case_folder, compute_offer_70
-from .schemas import OutstandingLien, OutstandingLiensUpdate  # NEW
+from .schemas import OutstandingLien, OutstandingLiensUpdate
+from dotenv import dotenv_values
+from app.services.skiptrace_service import (
+    get_case_address_components,
+    batchdata_skip_trace,
+    batchdata_property_lookup_all_attributes,
+    save_property_for_case,
+    save_skiptrace_row,
+    load_property_for_case,
+    load_skiptrace_for_case,
+)
+
+from app.services.report_service import generate_case_report
+from app.services.update_cases_service import run_update_cases_job
+from app.services.update_cases_service import LAST_UPDATE_STATUS
+
+
+# Resolve project root (adjust if your .env lives somewhere else)
+BASE_DIR = Path(__file__).resolve().parent.parent  # e.g. C:\pascowebapp
+ENV_PATH = BASE_DIR / ".env"
+
+# Read ONLY from the .env file
+env_values = dotenv_values(ENV_PATH)
+
+BATCHDATA_API_KEY = env_values.get("BATCHDATA_API_KEY")
+
+print("DEBUG: .env path =", ENV_PATH)
+print("DEBUG: BATCHDATA_API_KEY from .env =", BATCHDATA_API_KEY)
 
 # ======================================================================
 # App bootstrap
@@ -131,6 +156,13 @@ def pasco_appraiser_url(parcel_id: str | None) -> Optional[str]:
     return f"https://search.pascopa.com/parcel.aspx?parcel={param}"
 
 
+# ======================================================================
+# BatchData Skip Trace config + helpers
+# Helpers located app/services/skiptrace_service.py
+# ======================================================================
+BATCHDATA_API_KEY = env_values.get("BATCHDATA_API_KEY")
+BATCHDATA_BASE_URL = "https://api.batchdata.com/api/v1"
+
 templates.env.filters["currency"] = _currency
 templates.env.globals["streetview_url"] = streetview_url
 templates.env.globals["pasco_appraiser_url"] = pasco_appraiser_url
@@ -139,11 +171,58 @@ templates.env.globals["pasco_appraiser_url"] = pasco_appraiser_url
 # DB session
 # ======================================================================
 def get_db():
+    """
+    Standard DB session dependency.
+    """
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+
+# ======================================================================
+# Skip Trace JSON Cache Helpers (legacy, still safe to keep)
+# ======================================================================
+def get_cached_skip_trace(case_id: int) -> Optional[dict]:
+    """
+    Read cached skip-trace JSON from the cases table, if any.
+    """
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT skip_trace_json FROM cases WHERE id = :id"),
+                {"id": case_id},
+            ).mappings().first()
+        if row and row.get("skip_trace_json"):
+            try:
+                return json.loads(row["skip_trace_json"])
+            except Exception as exc:
+                logger.warning(
+                    "Failed to parse skip_trace_json for case %s: %s", case_id, exc
+                )
+                return None
+    except Exception as exc:
+        logger.warning(
+            "Failed to read skip_trace_json for case %s: %s", case_id, exc
+        )
+    return None
+
+
+def set_cached_skip_trace(case_id: int, payload: dict) -> None:
+    """
+    Persist skip-trace JSON into the cases.skip_trace_json column.
+    """
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                "UPDATE cases SET skip_trace_json = :payload WHERE id = :id",
+                {"payload": json.dumps(payload), "id": case_id},
+            )
+    except Exception as exc:
+        logger.warning(
+            "Failed to write skip_trace_json for case %s: %s", case_id, exc
+        )
 
 
 Base.metadata.create_all(bind=engine)
@@ -166,146 +245,258 @@ def ensure_sqlite_columns():
                 conn.exec_driver_sql(
                     "ALTER TABLE cases ADD COLUMN previous_deed_path TEXT DEFAULT ''"
                 )
-            # NEW: Outstanding liens column (JSON stored as TEXT)
+            # Outstanding liens column (JSON stored as TEXT)
             if "outstanding_liens" not in cols:
                 conn.exec_driver_sql(
                     "ALTER TABLE cases ADD COLUMN outstanding_liens TEXT DEFAULT '[]'"
+                )
+            # Skip trace JSON cache
+            if "skip_trace_json" not in cols:
+                conn.exec_driver_sql(
+                    "ALTER TABLE cases ADD COLUMN skip_trace_json TEXT DEFAULT NULL"
                 )
     except OperationalError:
         # first run or non-sqlite; ignore
         pass
 
+
+# --------------------------------------------------------
+#  SKIP TRACE NORMALIZED TABLE (CREATE ON STARTUP)
+# --------------------------------------------------------
+@app.on_event("startup")
+# --------------------------------------------------------
+#  SKIP TRACE NORMALIZED TABLES (CREATE ON STARTUP)
+# --------------------------------------------------------
+@app.on_event("startup")
+def ensure_skiptrace_tables():
+    """
+    Ensure the skip-trace tables exist:
+
+      - case_skiptrace         (1 row per case: owner + property address)
+      - case_skiptrace_phone   (N rows per case: all phones)
+      - case_skiptrace_email   (N rows per case: all emails)
+    """
+    try:
+        with engine.begin() as conn:
+            # Base summary table (leave existing extra columns alone if already created)
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE IF NOT EXISTS case_skiptrace (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    case_id INTEGER NOT NULL UNIQUE,
+                    owner_name TEXT,
+                    prop_street TEXT,
+                    prop_city TEXT,
+                    prop_state TEXT,
+                    prop_zip TEXT,
+                    FOREIGN KEY(case_id) REFERENCES cases(id)
+                )
+                """
+            )
+
+            # Phones: one row per phone record
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE IF NOT EXISTS case_skiptrace_phone (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    case_id INTEGER NOT NULL,
+                    number TEXT,
+                    type TEXT,
+                    carrier TEXT,
+                    last_reported TEXT,
+                    score INTEGER,
+                    tested INTEGER,
+                    reachable INTEGER,
+                    dnc INTEGER,
+                    FOREIGN KEY(case_id) REFERENCES cases(id)
+                )
+                """
+            )
+
+            # Emails: one row per email record
+            conn.exec_driver_sql(
+                """
+                CREATE TABLE IF NOT EXISTS case_skiptrace_email (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    case_id INTEGER NOT NULL,
+                    email TEXT,
+                    tested INTEGER,
+                    FOREIGN KEY(case_id) REFERENCES cases(id)
+                )
+                """
+            )
+    except OperationalError:
+        # sqlite / first run quirks; ignore
+        pass
+    except Exception as exc:
+        logger.warning("Failed to ensure skip-trace tables: %s", exc)
+# --------------------------------------------------------
+#  PROPERTY LOOKUP TABLE (CREATE ON STARTUP)
+# --------------------------------------------------------
+# --------------------------------------------------------
+#  PROPERTY DETAIL TABLE (CREATE/MIGRATE ON STARTUP)
+# --------------------------------------------------------
+@app.on_event("startup")
+def ensure_property_table():
+    """
+    Ensure case_property exists with all expected columns.
+    If the table already exists (older schema), add any missing columns.
+    """
+    try:
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+
+        desired_ddl = """
+            CREATE TABLE IF NOT EXISTS case_property (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id INTEGER NOT NULL UNIQUE,
+
+                -- BatchData property id
+                batch_property_id TEXT,
+
+                -- Address block
+                address_validity        TEXT,
+                address_house_number    TEXT,
+                address_street          TEXT,
+                address_city            TEXT,
+                address_county          TEXT,
+                address_state           TEXT,
+                address_zip             TEXT,
+                address_zip_plus4       TEXT,
+                address_latitude        REAL,
+                address_longitude       REAL,
+                address_county_fips     TEXT,
+                address_hash            TEXT,
+
+                -- Demographics block
+                demo_age                     INTEGER,
+                demo_household_size          INTEGER,
+                demo_income                  INTEGER,
+                demo_net_worth               INTEGER,
+                demo_discretionary_income    INTEGER,
+                demo_homeowner_renter_code   TEXT,
+                demo_homeowner_renter        TEXT,
+                demo_gender_code             TEXT,
+                demo_gender                  TEXT,
+                demo_child_count             INTEGER,
+                demo_has_children            INTEGER,
+                demo_marital_status_code     TEXT,
+                demo_marital_status          TEXT,
+                demo_single_parent           INTEGER,
+                demo_religious               INTEGER,
+                demo_religious_affil_code    TEXT,
+                demo_religious_affil         TEXT,
+                demo_education_code          TEXT,
+                demo_education               TEXT,
+                demo_occupation              TEXT,
+                demo_occupation_code         TEXT,
+
+                -- Foreclosure block
+                fc_status_code          TEXT,
+                fc_status               TEXT,
+                fc_recording_date       TEXT,
+                fc_filing_date          TEXT,
+                fc_case_number          TEXT,
+                fc_auction_date         TEXT,
+                fc_auction_time         TEXT,
+                fc_auction_location     TEXT,
+                fc_auction_city         TEXT,
+                fc_auction_min_bid      REAL,
+                fc_document_number      TEXT,
+                fc_book_number          TEXT,
+                fc_page_number          TEXT,
+                fc_document_type_code   TEXT,
+                fc_document_type        TEXT,
+
+                -- Full deed history + full payload backup
+                deed_history_json   TEXT,
+                raw_json            TEXT,
+
+                created_at          TEXT,
+                updated_at          TEXT,
+
+                FOREIGN KEY(case_id) REFERENCES cases(id)
+            )
+        """
+
+        with engine.begin() as conn:
+            # 1) Create table if it doesn't exist at all
+            if "case_property" not in tables:
+                conn.exec_driver_sql(desired_ddl)
+                return
+
+            # 2) If it DOES exist (older version), add missing columns
+            existing_cols = {c["name"] for c in inspector.get_columns("case_property")}
+
+            columns_to_add = [
+                ("batch_property_id", "TEXT"),
+                ("address_validity", "TEXT"),
+                ("address_house_number", "TEXT"),
+                ("address_street", "TEXT"),
+                ("address_city", "TEXT"),
+                ("address_county", "TEXT"),
+                ("address_state", "TEXT"),
+                ("address_zip", "TEXT"),
+                ("address_zip_plus4", "TEXT"),
+                ("address_latitude", "REAL"),
+                ("address_longitude", "REAL"),
+                ("address_county_fips", "TEXT"),
+                ("address_hash", "TEXT"),
+                ("demo_age", "INTEGER"),
+                ("demo_household_size", "INTEGER"),
+                ("demo_income", "INTEGER"),
+                ("demo_net_worth", "INTEGER"),
+                ("demo_discretionary_income", "INTEGER"),
+                ("demo_homeowner_renter_code", "TEXT"),
+                ("demo_homeowner_renter", "TEXT"),
+                ("demo_gender_code", "TEXT"),
+                ("demo_gender", "TEXT"),
+                ("demo_child_count", "INTEGER"),
+                ("demo_has_children", "INTEGER"),
+                ("demo_marital_status_code", "TEXT"),
+                ("demo_marital_status", "TEXT"),
+                ("demo_single_parent", "INTEGER"),
+                ("demo_religious", "INTEGER"),
+                ("demo_religious_affil_code", "TEXT"),
+                ("demo_religious_affil", "TEXT"),
+                ("demo_education_code", "TEXT"),
+                ("demo_education", "TEXT"),
+                ("demo_occupation", "TEXT"),
+                ("demo_occupation_code", "TEXT"),
+                ("fc_status_code", "TEXT"),
+                ("fc_status", "TEXT"),
+                ("fc_recording_date", "TEXT"),
+                ("fc_filing_date", "TEXT"),
+                ("fc_case_number", "TEXT"),
+                ("fc_auction_date", "TEXT"),
+                ("fc_auction_time", "TEXT"),
+                ("fc_auction_location", "TEXT"),
+                ("fc_auction_city", "TEXT"),
+                ("fc_auction_min_bid", "REAL"),
+                ("fc_document_number", "TEXT"),
+                ("fc_book_number", "TEXT"),
+                ("fc_page_number", "TEXT"),
+                ("fc_document_type_code", "TEXT"),
+                ("fc_document_type", "TEXT"),
+                ("deed_history_json", "TEXT"),
+                ("raw_json", "TEXT"),
+                ("created_at", "TEXT"),
+                ("updated_at", "TEXT"),
+            ]
+
+            for col_name, col_type in columns_to_add:
+                if col_name not in existing_cols:
+                    conn.exec_driver_sql(
+                        f"ALTER TABLE case_property ADD COLUMN {col_name} {col_type}"
+                    )
+    except Exception as exc:
+        logger.warning("Failed to ensure/migrate case_property table: %s", exc)
+
+
+
 # ======================================================================
 # Helpers: shell runner + scraper glue
 # ======================================================================
-async def run_command_with_logs(cmd: list[str], job_id: str) -> int:
-    """
-    Async process runner that streams stdout->progress_bus line by line.
-    """
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    assert proc.stdout is not None
-    async for raw in proc.stdout:
-        await progress_bus.publish(job_id, raw.decode(errors="ignore").rstrip("\\n"))
-    rc = await proc.wait()
-    await progress_bus.publish(job_id, f"[done] exit_code={rc}")
-    return rc
-
-
-def _find_scraper_script() -> Path:
-    """
-    Locate `pasco_foreclosure_scraper.py` in either:
-    - <root>/Pasco Foreclosure Scrape
-    - <root>/app/scrapers
-    """
-    candidates = [
-        BASE_DIR / "Pasco Foreclosure Scrape" / "pasco_foreclosure_scraper.py",
-        BASE_DIR / "app" / "scrapers" / "pasco_foreclosure_scraper.py",
-    ]
-    for p in candidates:
-        if p.exists():
-            return p
-    raise HTTPException(
-        status_code=500,
-        detail=(
-            "Scraper script not found. Place 'pasco_foreclosure_scraper.py' in "
-            "'Pasco Foreclosure Scrape/' or 'app/scrapers/'."
-        ),
-    )
-
-
-def _import_csv_into_db(db: Session, csv_path: str) -> tuple[int, int, int]:
-    """
-    Lightweight importer (upsert by case_number, ignore duplicates).
-    Returns (added, updated, skipped).
-    """
-    import re
-    logger = logging.getLogger(__name__)
-
-    def norm_case(s):
-        s = str(s or "").strip().replace("\\", "-").replace("/", "-")
-        s = re.sub(r"\s+", "", s)
-        return s
-
-    def pick_col(headers, candidates):
-        """
-        Given a list of headers and candidate names, return the first
-        header that matches (case-insensitive, trimmed).
-        """
-        norm_headers = [h.strip().lower() for h in headers]
-        for cand in candidates:
-            cand_norm = cand.strip().lower()
-            if cand_norm in norm_headers:
-                # return the original header name exactly as in the CSV
-                return headers[norm_headers.index(cand_norm)]
-        return None
-
-    added, updated, skipped = 0, 0, 0
-
-    with open(csv_path, newline="", encoding="utf-8-sig") as f:
-        reader = _csv.DictReader(f)
-        headers = reader.fieldnames or []
-        logger.info("UpdateCases: CSV headers = %s", headers)
-
-        # Try multiple possible names for important columns
-        case_col   = pick_col(headers, ["Case #", "Case Number", "Case", "Case No.", "Case No"])
-        filing_col = pick_col(headers, ["Filing Date", "Filing", "Filed"])
-        style_col  = pick_col(headers, ["Case Name", "Style", "Case Style"])
-
-        if not case_col:
-            msg = f"Could not find case number column in CSV headers: {headers}"
-            logger.error("UpdateCases: %s", msg)
-            # fail cleanly so you see the error on the progress page
-            raise HTTPException(status_code=400, detail=msg)
-
-        for row in reader:
-            cn_raw = row.get(case_col, "")
-            cn = norm_case(cn_raw)
-            if not cn:
-                skipped += 1
-                continue
-
-            case = db.query(Case).filter(Case.case_number == cn).one_or_none()
-            if not case:
-                case = Case(case_number=cn)
-                if filing_col:
-                    case.filing_datetime = row.get(filing_col, "") or None
-                if style_col:
-                    case.style = row.get(style_col, "") or None
-                db.add(case)
-                db.flush()
-                added += 1
-            else:
-                # only fill blanks to avoid overwriting your manual edits
-                if not case.filing_datetime and filing_col:
-                    case.filing_datetime = row.get(filing_col, "") or None
-                if not case.style and style_col:
-                    case.style = row.get(style_col, "") or None
-                updated += 1
-
-            # defendants: add only new names
-            dnames = [
-                row.get(k, "")
-                for k in row.keys()
-                if k and k.strip().lower().startswith("defendant")
-            ]
-            dnames = [d.strip() for d in dnames if d and d.strip()]
-
-            existing = {d.name for d in (case.defendants or [])}
-            for name in dnames:
-                if name not in existing:
-                    db.add(Defendant(case_id=case.id, name=name))
-
-        db.commit()
-
-    logger.info(
-        "UpdateCases: Import complete. Added=%s Updated=%s Skipped=%s",
-        added, updated, skipped,
-    )
-    return added, updated, skipped
 
 
 # ======================================================================
@@ -316,26 +507,23 @@ def home():
     return RedirectResponse(url="/cases", status_code=303)
 
 
-# @app.get("/cases", response_class=HTMLResponse)
-#def cases_list(request: Request, page: int = Query(1), db: Session = Depends(get_db)):
-#    qry = db.query(Case)
-#    page_size = 10
-#    total = qry.count()
-#    pages = (total + page_size - 1) // page_size
-#    logger.info("Cases pagination: total=%s pages=%s page=%s", total, pages, page)
-#    offset = (page - 1) * page_size
-#    cases = qry.order_by(Case.filing_datetime.desc()).offset(offset).limit(page_size).all()
-#    pagination = {"page": page, "pages": pages, "total": total}
-#    return templates.TemplateResponse(
-#        "cases_list.html",
-#        {"request": request, "cases": cases, "pagination": pagination},
-#    )
-
-
-# Case detail — explicitly fetch notes and attach to `case` so template can use `case.notes`
 @app.get("/cases/new", response_class=HTMLResponse)
 def new_case_form(request: Request):
     return templates.TemplateResponse("cases_new.html", {"request": request, "error": None})
+
+@app.get("/update_cases/status")
+async def get_update_cases_status():
+    """
+    Returns the last UpdateCases job status:
+      {
+        "last_run": "2025-12-10T03:00:00",
+        "success": true/false/null,
+        "since_days": 1,
+        "message": "Import complete. added=..., updated=..., skipped=..."
+      }
+    """
+    return LAST_UPDATE_STATUS
+
 @app.post("/cases/create")
 def create_case(
     request: Request,
@@ -344,9 +532,9 @@ def create_case(
     style: Optional[str] = Form(None),
     parcel_id: Optional[str] = Form(None),
     address_override: Optional[str] = Form(None),
-    arv: Optional[str] = Form(None),            # <-- accept as str
-    rehab: Optional[str] = Form(None),          # <-- accept as str
-    closing_costs: Optional[str] = Form(None),  # <-- accept as str
+    arv: Optional[str] = Form(None),
+    rehab: Optional[str] = Form(None),
+    closing_costs: Optional[str] = Form(None),
     defendants_csv: Optional[str] = Form(None),
     db: Session = Depends(get_db),
 ):
@@ -375,17 +563,23 @@ def create_case(
     case = Case(case_number=cn)
     if filing_date:
         case.filing_datetime = filing_date.strip()
-    if style: case.style = style.strip()
-    if parcel_id: case.parcel_id = parcel_id.strip()
-    if address_override: case.address_override = address_override.strip()
+    if style:
+        case.style = style.strip()
+    if parcel_id:
+        case.parcel_id = parcel_id.strip()
+    if address_override:
+        case.address_override = address_override.strip()
 
     # only set if provided
     v_arv = _num(arv)
     v_rehab = _num(rehab)
     v_cc = _num(closing_costs)
-    if v_arv is not None: case.arv = v_arv
-    if v_rehab is not None: case.rehab = v_rehab
-    if v_cc is not None: case.closing_costs = v_cc
+    if v_arv is not None:
+        case.arv = v_arv
+    if v_rehab is not None:
+        case.rehab = v_rehab
+    if v_cc is not None:
+        case.closing_costs = v_cc
 
     db.add(case)
     db.flush()
@@ -402,6 +596,65 @@ def create_case(
     db.commit()
     return RedirectResponse(url=f"/cases/{case.id}", status_code=303)
 
+@app.post("/cases/{case_id}/update", response_class=HTMLResponse)
+def update_case_fields(
+    request: Request,
+    case_id: int,
+    parcel_id: Optional[str] = Form(None),
+    address_override: Optional[str] = Form(None),
+    arv: Optional[str] = Form(None),
+    rehab: Optional[str] = Form(None),
+    closing_costs: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+):
+    # Load case
+    getter = getattr(db, "get", None)
+    if callable(getter):
+        case = db.get(Case, case_id)
+    else:
+        case = db.query(Case).get(case_id)  # type: ignore[call-arg]
+
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    # Helper to parse numbers (same logic as in create_case)
+    def _num(x: Optional[str]) -> Optional[float]:
+        if x is None:
+            return None
+        s = x.strip()
+        if not s:
+            return None
+        try:
+            return float(s.replace(",", ""))
+        except ValueError:
+            return None
+
+    # Text fields
+    if parcel_id:
+        case.parcel_id = parcel_id.strip()
+    if address_override:
+        case.address_override = address_override.strip()
+
+    # Numbers (only set if provided)
+    v_arv = _num(arv)
+    v_rehab = _num(rehab)
+    v_cc = _num(closing_costs)
+
+    if v_arv is not None:
+        case.arv = v_arv
+    if v_rehab is not None:
+        case.rehab = v_rehab
+    if v_cc is not None:
+        case.closing_costs = v_cc
+
+    db.add(case)
+    db.commit()
+
+    # Send user back to the case detail page
+    return RedirectResponse(
+        url=request.url_for("case_detail", case_id=case.id),
+        status_code=303,
+    )
 
 @app.get("/cases/{case_id}", response_class=HTMLResponse)
 def case_detail(request: Request, case_id: int, db: Session = Depends(get_db)):
@@ -414,44 +667,27 @@ def case_detail(request: Request, case_id: int, db: Session = Depends(get_db)):
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    # Clean up defendants list (hide blank / nan / nil)
-    try:
-        raw_defs = list(getattr(case, "defendants", []) or [])
-        cleaned_defs = []
-        for d in raw_defs:
-            name = (getattr(d, "name", "") or "").strip()
-            if not name:
-                continue
-            lower = name.lower()
-            if lower in {"nan", "none", "nil"}:
-                continue
-            cleaned_defs.append(d)
-        try:
-            setattr(case, "defendants", cleaned_defs)
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-    return templates.TemplateResponse(
-        "case_detail.html",
-        {
-            "request": request,
-            "case": case,
-        },
+    notes = (
+        db.query(Note)
+        .filter(Note.case_id == case_id)
+        .order_by(Note.id.desc())
+        .all()
     )
-
-    if not case:
-        return RedirectResponse(url="/cases", status_code=303)
-
-    # fetch notes explicitly and attach so Jinja can access `case.notes`
-    notes = db.query(Note).filter(Note.case_id == case_id).order_by(Note.id.desc()).all()
     try:
         setattr(case, "notes", notes)
     except Exception:
         pass
 
+    # Skip trace from normalized table (if present)
+    skip_trace = load_skiptrace_for_case(case_id)
+    skip_trace_error = None
+
+    # Property lookup (if present)
+    property_data = load_property_for_case(case_id)
+    property_error = None
+
     offer = compute_offer_70(case.arv or 0, case.rehab or 0, case.closing_costs or 0)
+
     return templates.TemplateResponse(
         "case_detail.html",
         {
@@ -459,8 +695,140 @@ def case_detail(request: Request, case_id: int, db: Session = Depends(get_db)):
             "case": case,
             "offer_70": offer,
             "active_parcel_id": case.parcel_id,
+            "notes": notes,
+            "skip_trace": skip_trace,
+            "skip_trace_error": skip_trace_error,
+            "property_data": property_data,
+            "property_error": property_error,
         },
     )
+
+
+
+# NEW: Skip trace endpoint using BatchData
+@app.post("/cases/{case_id}/skip-trace", response_class=HTMLResponse)
+def skip_trace_case(request: Request, case_id: int, db: Session = Depends(get_db)):
+    # Load case
+    getter = getattr(db, "get", None)
+    if callable(getter):
+        case = db.get(Case, case_id)
+    else:
+        case = db.query(Case).get(case_id)  # type: ignore[call-arg]
+
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    # Notes
+    notes = (
+        db.query(Note)
+        .filter(Note.case_id == case_id)
+        .order_by(Note.id.desc())
+        .all()
+    )
+
+    skip_trace: Optional[dict] = None
+    skip_trace_error: Optional[str] = None
+
+    # 1) Try table-based cache first
+    skip_trace = load_skiptrace_for_case(case_id)
+
+    # 2) If no stored data, call BatchData and persist normalized row
+    if skip_trace is None:
+        street, city, state, postal_code = get_case_address_components(case)
+
+        try:
+            skip_trace = batchdata_skip_trace(street, city, state, postal_code)
+            # Save normalized into case_skiptrace
+            save_skiptrace_row(case.id, skip_trace)
+            # (optional) also keep JSON cache if you still want it:
+            # set_cached_skip_trace(case_id, skip_trace)
+        except HTTPException as exc:
+            detail = exc.detail
+            skip_trace_error = detail if isinstance(detail, str) else str(detail)
+        except Exception as exc:
+            skip_trace_error = f"Unexpected error during skip trace: {exc}"
+
+    offer = compute_offer_70(case.arv or 0, case.rehab or 0, case.closing_costs or 0)
+
+    return templates.TemplateResponse(
+        "case_detail.html",
+        {
+            "request": request,
+            "case": case,
+            "offer_70": offer,
+            "active_parcel_id": case.parcel_id,
+            "notes": notes,
+            "skip_trace": skip_trace,
+            "skip_trace_error": skip_trace_error,
+            "property_data": load_property_for_case(case_id),
+            "property_error": None,
+        },
+    )
+
+@app.post("/cases/{case_id}/property-lookup", response_class=HTMLResponse)
+def property_lookup_case(request: Request, case_id: int, db: Session = Depends(get_db)):
+    # Load case
+    getter = getattr(db, "get", None)
+    if callable(getter):
+        case = db.get(Case, case_id)
+    else:
+        case = db.query(Case).get(case_id)  # type: ignore[call-arg]
+
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    # Notes
+    notes = (
+        db.query(Note)
+        .filter(Note.case_id == case_id)
+        .order_by(Note.id.desc())
+        .all()
+    )
+    try:
+        setattr(case, "notes", notes)
+    except Exception:
+        pass
+
+    # Existing skip trace (unchanged)
+    skip_trace = load_skiptrace_for_case(case_id)
+    skip_trace_error: Optional[str] = None
+
+    # Property lookup
+    property_data: Optional[dict] = None
+    property_error: Optional[str] = None
+
+    try:
+        street, city, state, postal_code = get_case_address_components(case)
+        property_data = batchdata_property_lookup_all_attributes(
+            street, city, state, postal_code
+        )
+        save_property_for_case(case.id, property_data)
+    except HTTPException as exc:
+        detail = exc.detail
+        property_error = detail if isinstance(detail, str) else str(detail)
+        # fall back to any previously saved data
+        property_data = load_property_for_case(case_id)
+    except Exception as exc:
+        property_error = f"Unexpected error during property lookup: {exc}"
+        property_data = load_property_for_case(case_id)
+
+    offer = compute_offer_70(case.arv or 0, case.rehab or 0, case.closing_costs or 0)
+
+    return templates.TemplateResponse(
+        "case_detail.html",
+        {
+            "request": request,
+            "case": case,
+            "offer_70": offer,
+            "active_parcel_id": case.parcel_id,
+            "notes": notes,
+            "skip_trace": skip_trace,
+            "skip_trace_error": skip_trace_error,
+            "property_data": property_data,
+            "property_error": property_error,
+        },
+    )
+
 
 # ======================================================================
 # SSE progress endpoints + update job orchestration
@@ -568,10 +936,18 @@ async def update_cases(
     Immediately redirects to a live log page.
     """
     job_id = uuid.uuid4().hex
+
     # prime the log so the progress page shows something immediately
     await progress_bus.publish(job_id, f"Queued job {job_id}…")
-    asyncio.create_task(_update_cases_job(job_id, since_days))
-    return RedirectResponse(url=f"/update_progress/{job_id}", status_code=303)
+
+    # delegate the heavy lifting to the service
+    asyncio.create_task(run_update_cases_job(job_id, since_days))
+
+    return RedirectResponse(
+        url=request.url_for("update_progress_page", job_id=job_id),
+        status_code=303,
+    )
+
 
 
 async def _update_cases_job(job_id: str, since_days: int):
@@ -600,8 +976,6 @@ async def _update_cases_job(job_id: str, since_days: int):
 
         # 2) Import CSV using the same logic as the CLI tool
         def _run_import():
-            # This is the same thing you just ran manually:
-            # python tools/import_pasco_csv.py "C:\...\pasco_foreclosures.csv"
             import_pasco_csv_main(csv_out)
 
         loop = asyncio.get_running_loop()
@@ -614,369 +988,22 @@ async def _update_cases_job(job_id: str, since_days: int):
         # Surface the exception in the log and signal completion
         await progress_bus.publish(job_id, f"[exception] {e}")
         await progress_bus.publish(job_id, "[done] exit_code=1")
+
+
 # ======================================================================
 # PDF Report for a Case (summary + attached documents)
 # ======================================================================
 @app.get("/cases/{case_id}/report")
 def case_report(case_id: int, db: Session = Depends(get_db)):
-    # Fetch case
-    getter = getattr(db, "get", None)
-    if callable(getter):
-        case = db.get(Case, case_id)
-    else:
-        case = db.query(Case).get(case_id)  # type: ignore[call-arg]
+    """
+    Lightweight wrapper that delegates to app.services.report_service.
+    """
+    return generate_case_report(case_id, db)
 
-    if not case:
-        raise HTTPException(status_code=404, detail="Case not found")
-
-    # -----------------------------
-    # 1) Build summary/cover page
-    # -----------------------------
-    summary_buf = io.BytesIO()
-    c = canvas.Canvas(summary_buf, pagesize=letter)
-    width, height = letter
-
-    y = height - 50
-
-    def line(text: str, dy: int = 16, bold: bool = False):
-        nonlocal y
-        if bold:
-            c.setFont("Helvetica-Bold", 12)
-        else:
-            c.setFont("Helvetica", 11)
-        c.drawString(50, y, text)
-        y -= dy
-
-    # Header
-    c.setFont("Helvetica-Bold", 18)
-    c.drawString(50, y, "JSN Holdings - Case Report")
-    y -= 30
-
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(50, y, f"Case ID: {case.id}")
-    y -= 18
-    c.drawString(50, y, f"Case Number: {case.case_number or ''}")
-    y -= 18
-
-    # Basic info
-    line(f"Filing Date: {case.filing_datetime or ''}")
-    line(f"Style / Case Name: {case.style or ''}")
-    line(f"Parcel ID: {case.parcel_id or ''}")
-    addr = (getattr(case, 'address_override', None) or getattr(case, 'address', '') or '').strip()
-    line(f"Address: {addr}")
-    # Financials
-    y -= 10
-    line("Financials:", bold=True)
-    arv_val = getattr(case, "arv", "") or ""
-    rehab_val = getattr(case, "rehab", "") or ""
-    closing_val = getattr(case, "closing_costs", "") or ""
-
-    def _fmt_money(raw) -> str:
-        # Accept str, int, float, or None and return a currency-formatted string when possible
-        if raw is None:
-            return ""
-        # If it's already a number, format directly
-        if isinstance(raw, (int, float)):
-            try:
-                return f"${float(raw):,.2f}"
-            except Exception:
-                return str(raw)
-        raw_str = str(raw).strip()
-        if not raw_str:
-            return ""
-        cleaned = raw_str.replace("$", "").replace(",", "")
-        try:
-            val = float(cleaned)
-            return f"${val:,.2f}"
-        except Exception:
-            # fall back to original string if not parseable
-            return raw_str
-
-    line(f"ARV: {_fmt_money(arv_val)}")
-    line(f"Rehab: {_fmt_money(rehab_val)}")
-    line(f"Closing Costs: {_fmt_money(closing_val)}")
-
-    # JSN deal calculator
-    try:
-        if isinstance(arv_val, (int, float)):
-            arv_num = float(arv_val)
-        else:
-            arv_num = float((str(arv_val) or "").replace("$", "").replace(",", "") or 0)
-    except Exception:
-        arv_num = 0.0
-    try:
-        if isinstance(rehab_val, (int, float)):
-            rehab_num = float(rehab_val)
-        else:
-            rehab_num = float((str(rehab_val) or "").replace("$", "").replace(",", "") or 0)
-    except Exception:
-        rehab_num = 0.0
-    try:
-        if isinstance(closing_val, (int, float)):
-            closing_num = float(closing_val)
-        else:
-            closing_num = float((str(closing_val) or "").replace("$", "").replace(",", "") or 0)
-    except Exception:
-        closing_num = 0.0
-
-    try:
-        from app.utils import compute_offer_70
-    except Exception:
-        # Fallback: simple 70% ARV minus costs if helper missing
-        def compute_offer_70(arv, rehab, closing):
-            return max(0.0, 0.7 * (arv or 0.0) - (rehab or 0.0) - (closing or 0.0))
-
-    offer_70 = compute_offer_70(arv_num, rehab_num, closing_num)
-    try:
-        offer_display = f"{offer_70:,.2f}"
-    except Exception:
-        offer_display = str(offer_70)
-    line(f"JSN Max Offer: ${offer_display}")
-
-    # Max Seller in Hand Cash (JSN Max Offer - sum of all liens)
-    total_liens_for_calc = 0.0
-    liens_raw_for_calc = getattr(case, "outstanding_liens", "[]") or "[]"
-    try:
-        liens_for_calc = json.loads(liens_raw_for_calc)
-    except Exception:
-        liens_for_calc = []
-    if isinstance(liens_for_calc, list):
-        for l in liens_for_calc:
-            if isinstance(l, dict):
-                amt_raw2 = (l.get("amount") or "").strip()
-            else:
-                amt_raw2 = ""
-            if not amt_raw2:
-                continue
-            cleaned2 = amt_raw2.replace("$", "").replace(",", "")
-            try:
-                total_liens_for_calc += float(cleaned2)
-            except Exception:
-                continue
-    try:
-        seller_cash = max(0.0, float(offer_70) - float(total_liens_for_calc))
-    except Exception:
-        seller_cash = 0.0
-    try:
-        seller_display = f"{seller_cash:,.2f}"
-    except Exception:
-        seller_display = str(seller_cash)
-    line(f"Max Seller in Hand Cash: ${seller_display}")
-
-    # Defendants
-    y -= 10
-    line("Defendants:", bold=True)
-    defendants = getattr(case, "defendants", []) or []
-    clean_defendants = []
-    for d in defendants:
-        name = (getattr(d, "name", "") or "").strip()
-        if not name:
-            continue
-        lower = name.lower()
-        if lower in {"nan", "none", "nil"}:
-            continue
-        clean_defendants.append(name)
-    if clean_defendants:
-        for name in clean_defendants:
-            line(f" - {name}")
-    else:
-        line(" - None recorded")
-    # Outstanding Liens (if present)
-    y -= 10
-    line("Outstanding Liens:", bold=True)
-    liens_raw = getattr(case, "outstanding_liens", "[]") or "[]"
-    try:
-        liens = json.loads(liens_raw)
-    except Exception:
-        liens = []
-    total_liens = 0.0
-    if isinstance(liens, list) and liens:
-        for idx, l in enumerate(liens):
-            if isinstance(l, dict):
-                desc = (l.get("description") or "").strip()
-                amt_raw = (l.get("amount") or "").strip()
-            else:
-                desc = str(l).strip()
-                amt_raw = ""
-
-            # Default description for first lien when missing → assume foreclosing mortgage
-            if not desc:
-                if idx == 0:
-                    desc = "Foreclosing Mortgage"
-                else:
-                    desc = "Lien"
-
-            # Normalize amount formatting
-            amt_str = ""
-            if amt_raw:
-                cleaned = amt_raw.replace("$", "").replace(",", "")
-                try:
-                    total_liens += float(cleaned)
-                except Exception:
-                    pass
-                # Pretty print
-                try:
-                    amt_val = float(cleaned)
-                    amt_str = f"${amt_val:,.2f}"
-                except Exception:
-                    amt_str = f"${cleaned}"
-
-            if amt_str:
-                line(f" - {desc} - {amt_str}")
-            else:
-                line(f" - {desc}")
-    else:
-        line(" - None recorded")
-
-    # Mortgage information (summarized from Mortgage PDF text if possible)
-    mortgage_info = "Not uploaded"
-    mort_rel = getattr(case, "mortgage_path", None)
-    if mort_rel:
-        try:
-            mort_path = UPLOAD_ROOT / mort_rel
-            if mort_path.exists():
-                try:
-                    r = PdfReader(str(mort_path))
-                except Exception:
-                    r = None
-                if r is not None:
-                    text_chunks = []
-                    # read first 2 pages to keep it light
-                    for page in r.pages[:2]:
-                        try:
-                            t = page.extract_text() or ""
-                        except Exception:
-                            t = ""
-                        if t:
-                            text_chunks.append(t)
-                    full_text = " ".join(text_chunks)
-                    full_text_norm = " ".join(full_text.split())
-                    if full_text_norm:
-                        snippet = full_text_norm[:200]
-                        if len(full_text_norm) > 200:
-                            snippet += "..."
-                        mortgage_info = snippet
-                    else:
-                        mortgage_info = "Uploaded (no extractable text found)"
-            else:
-                mortgage_info = "Uploaded (file not found on disk)"
-        except Exception:
-            mortgage_info = "Uploaded (error reading file)"
-
-    line(f"Mortgage Info: {mortgage_info}")
-
-    # Notes summary (list recent notes)
-    notes = getattr(case, "notes", None)
-    if notes is None:
-        # lazily load notes if not attached
-        notes = db.query(Note).filter(Note.case_id == case_id).order_by(Note.id.desc()).all()
-    y -= 10
-    line("Notes:", bold=True)
-    if notes:
-        for n in notes:
-            content = (getattr(n, "content", "") or "").strip()
-            if not content:
-                continue
-            if len(content) > 160:
-                content = content[:157] + "..."
-            line(f" - {content}")
-    else:
-        line(" - None recorded")
-
-    # Attached documents list
-    y -= 10
-    line("Attached Documents:", bold=True)
-    attachments = []
-
-    def add_doc(label: str, attr: str):
-        rel = getattr(case, attr, None)
-        if rel:
-            attachments.append((label, rel))
-
-    add_doc("Verified Complaint", "verified_complaint_path")
-    add_doc("Value Calculation", "value_calc_path")
-    add_doc("Mortgage", "mortgage_path")
-    add_doc("Current Deed", "current_deed_path")
-    add_doc("Previous Deed", "previous_deed_path")
-
-    if attachments:
-        for label, rel in attachments:
-            line(f" - {label}: {rel}")
-    else:
-        line(" - No documents uploaded")
-
-    c.showPage()
-    c.save()
-    summary_buf.seek(0)
-
-    # -----------------------------
-    # 2) Merge summary + attachments
-    # -----------------------------
-    writer = PdfWriter()
-
-    # Add summary as first pages
-    summary_reader = PdfReader(summary_buf)
-    for page in summary_reader.pages:
-        writer.add_page(page)
-
-    # Now append each attached PDF if it exists on disk
-    # Paths are stored relative to UPLOAD_ROOT, e.g. "CASE123/Verified_Complaint.pdf"
-    from pathlib import Path as _Path
-
-    for label, rel in attachments:
-        # UPLOAD_ROOT is already defined in main.py
-        abs_path = _Path(UPLOAD_ROOT) / rel
-        if abs_path.exists():
-            try:
-                reader = PdfReader(str(abs_path))
-                for page in reader.pages:
-                    writer.add_page(page)
-            except Exception:
-                # Skip corrupted/unreadable PDF
-                continue
-
-    # Write combined PDF to buffer
-    out_buf = io.BytesIO()
-    writer.write(out_buf)
-    out_buf.seek(0)
-
-    filename = f"case_{case.id}_report.pdf"
-    return StreamingResponse(
-        out_buf,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
 
 # ======================================================================
-# Case editing / uploads / notes
+# Case document uploads
 # ======================================================================
-@app.post("/cases/{case_id}/update")
-def case_update(
-    case_id: int,
-    parcel_id: Optional[str] = Form(None),
-    address_override: Optional[str] = Form(None),
-    arv: Optional[float] = Form(None),
-    rehab: Optional[float] = Form(None),
-    closing_costs: Optional[float] = Form(None),
-    db: Session = Depends(get_db),
-):
-    case = db.query(Case).get(case_id)  # type: ignore[call-arg]
-    if not case:
-        return RedirectResponse("/cases", status_code=303)
-    if parcel_id is not None:
-        case.parcel_id = (parcel_id or "").strip()
-    if address_override is not None:
-        case.address_override = (address_override or "").strip()
-    if arv not in (None, ""):
-        case.arv = float(arv)
-    if rehab not in (None, ""):
-        case.rehab = float(rehab)
-    if closing_costs not in (None, ""):
-        case.closing_costs = float(closing_costs)
-    db.commit()
-    return RedirectResponse(f"/cases/{case_id}", status_code=303)
-
-
 @app.post("/cases/{case_id}/upload/verified")
 async def upload_verified(
     case_id: int, verified_complaint: UploadFile = File(...), db: Session = Depends(get_db)
@@ -984,10 +1011,12 @@ async def upload_verified(
     case = db.query(Case).get(case_id)  # type: ignore[call-arg]
     if not case:
         return RedirectResponse("/cases", status_code=303)
+
     folder = ensure_case_folder(str(UPLOAD_ROOT), case.case_number)
     dest = Path(folder) / "Verified_Complaint.pdf"
     with open(dest, "wb") as f:
         f.write(await verified_complaint.read())
+
     case.verified_complaint_path = dest.relative_to(UPLOAD_ROOT).as_posix()
     db.commit()
     return RedirectResponse(f"/cases/{case_id}", status_code=303)
@@ -1000,10 +1029,12 @@ async def upload_value_calc(
     case = db.query(Case).get(case_id)  # type: ignore[call-arg]
     if not case:
         return RedirectResponse("/cases", status_code=303)
+
     folder = ensure_case_folder(str(UPLOAD_ROOT), case.case_number)
     dest = Path(folder) / "Value_Calculation.pdf"
     with open(dest, "wb") as f:
         f.write(await value_calc.read())
+
     case.value_calc_path = dest.relative_to(UPLOAD_ROOT).as_posix()
     db.commit()
     return RedirectResponse(f"/cases/{case_id}", status_code=303)
@@ -1016,10 +1047,12 @@ async def upload_mortgage(
     case = db.query(Case).get(case_id)  # type: ignore[call-arg]
     if not case:
         return RedirectResponse("/cases", status_code=303)
+
     folder = ensure_case_folder(str(UPLOAD_ROOT), case.case_number)
     dest = Path(folder) / "Mortgage.pdf"
     with open(dest, "wb") as f:
         f.write(await mortgage.read())
+
     case.mortgage_path = dest.relative_to(UPLOAD_ROOT).as_posix()
     db.commit()
     return RedirectResponse(f"/cases/{case_id}", status_code=303)
@@ -1032,10 +1065,12 @@ async def upload_current_deed(
     case = db.query(Case).get(case_id)  # type: ignore[call-arg]
     if not case:
         return RedirectResponse("/cases", status_code=303)
+
     folder = ensure_case_folder(str(UPLOAD_ROOT), case.case_number)
     dest = Path(folder) / "Current_Deed.pdf"
     with open(dest, "wb") as f:
         f.write(await current_deed.read())
+
     case.current_deed_path = dest.relative_to(UPLOAD_ROOT).as_posix()
     db.commit()
     return RedirectResponse(f"/cases/{case_id}", status_code=303)
@@ -1048,12 +1083,87 @@ async def upload_previous_deed(
     case = db.query(Case).get(case_id)  # type: ignore[call-arg]
     if not case:
         return RedirectResponse("/cases", status_code=303)
+
     folder = ensure_case_folder(str(UPLOAD_ROOT), case.case_number)
     dest = Path(folder) / "Previous_Deed.pdf"
     with open(dest, "wb") as f:
         f.write(await previous_deed.read())
+
     case.previous_deed_path = dest.relative_to(UPLOAD_ROOT).as_posix()
     db.commit()
+    return RedirectResponse(f"/cases/{case_id}", status_code=303)
+
+@app.post("/cases/{case_id}/documents/upload")
+async def upload_case_document(
+    case_id: int,
+    file: UploadFile = File(...),
+    doc_type: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    """
+    Single upload endpoint. Uses doc_type to decide where to store the file:
+    - verified          -> case.verified_complaint_path
+    - mortgage          -> case.mortgage_path
+    - current_deed      -> case.current_deed_path
+    - previous_deed     -> case.previous_deed_path
+    - value_calc        -> case.value_calc_path
+    - other             -> generic Docket record
+    """
+    # Load case
+    case = db.query(Case).get(case_id)  # type: ignore[call-arg]
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    # Normalize doc_type
+    dt = (doc_type or "").strip().lower()
+
+    # Make sure we have a filename
+    original_name = file.filename or "document.pdf"
+    safe_name = original_name.replace("/", "_").replace("\\", "_")
+
+    # Folder per case
+    folder = ensure_case_folder(str(UPLOAD_ROOT), case.case_number)
+
+    # Map the dropdown choice to a fixed filename + case field
+    mapping = {
+        "verified":      ("Verified_Complaint.pdf", "verified_complaint_path", "Verified Complaint"),
+        "mortgage":      ("Mortgage.pdf", "mortgage_path", "Mortgage"),
+        "current_deed":  ("Current_Deed.pdf", "current_deed_path", "Current Deed"),
+        "previous_deed": ("Previous_Deed.pdf", "previous_deed_path", "Previous Deed"),
+        "value_calc":    ("Value_Calculation.pdf", "value_calc_path", "Value Calculation"),
+    }
+
+    if dt in mapping:
+        target_name, attr_name, _label = mapping[dt]
+        dest = Path(folder) / target_name
+    else:
+        # "other" or anything unknown: keep the user’s filename
+        dest = Path(folder) / safe_name
+        attr_name = None  # will create a Docket row instead
+
+    # Save file to disk
+    content = await file.read()
+    with open(dest, "wb") as f:
+        f.write(content)
+
+    rel_path = dest.relative_to(UPLOAD_ROOT).as_posix()
+
+    # If it’s a known type, store on the Case model
+    if attr_name:
+        setattr(case, attr_name, rel_path)
+        db.add(case)
+        db.commit()
+    else:
+        # Generic "Other" document -> create a Docket record
+        docket = Docket(
+            case_id=case.id,
+            file_name=safe_name,
+            file_url=f"/uploads/{rel_path}",
+            description=original_name,
+        )
+        db.add(docket)
+        db.commit()
+
     return RedirectResponse(f"/cases/{case_id}", status_code=303)
 
 
@@ -1071,6 +1181,7 @@ def add_note(case_id: int, content: str = Form(...), db: Session = Depends(get_d
     db.commit()
     return RedirectResponse(url=f"/cases/{case_id}", status_code=303)
 
+
 # ======================================================================
 # NEW: Outstanding Liens API
 # ======================================================================
@@ -1080,6 +1191,7 @@ def get_outstanding_liens(case_id: int, db: Session = Depends(get_db)):
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
     return case.get_outstanding_liens()
+
 
 @app.post("/cases/{case_id}/liens", response_model=list[OutstandingLien])
 def save_outstanding_liens(case_id: int, payload: OutstandingLiensUpdate, db: Session = Depends(get_db)):
@@ -1094,70 +1206,16 @@ def save_outstanding_liens(case_id: int, payload: OutstandingLiensUpdate, db: Se
 
 
 # ======================================================================
-# Helpers: shell runner + scraper glue (robust Windows-friendly)
-# ======================================================================
-import asyncio, subprocess
-
-async def run_command_with_logs(cmd: list[str], job_id: str) -> int:
-    """
-    Robust process runner that streams stdout -> progress_bus line by line.
-    Uses asyncio subprocess when available; on Windows fallback to a thread.
-    """
-    # Try the native asyncio subprocess first
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        assert proc.stdout is not None
-        async for raw in proc.stdout:
-            await progress_bus.publish(job_id, raw.decode(errors="ignore").rstrip("\n"))
-        rc = await proc.wait()
-        await progress_bus.publish(job_id, f"[done] exit_code={rc}")
-        return rc
-
-    except (NotImplementedError, RuntimeError, AttributeError):
-        # Windows / event loop edge case: fallback to blocking Popen in a thread
-
-        # Grab the current event loop here (in async context),
-        # then use loop.call_soon_threadsafe() inside the worker thread.
-        loop = asyncio.get_running_loop()
-
-        def _blocking_runner() -> int:
-            with subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True,
-            ) as p:
-                assert p.stdout is not None
-                for line in p.stdout:
-                    # Hand off to the async loop via call_soon_threadsafe
-                    loop.call_soon_threadsafe(
-                        asyncio.create_task,
-                        progress_bus.publish(job_id, line.rstrip("\n")),
-                    )
-                return p.wait()
-
-        rc = await loop.run_in_executor(None, _blocking_runner)
-        await progress_bus.publish(job_id, f"[done] exit_code={rc}")
-        return rc
-
-
-
 # Simple health check
+# ======================================================================
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
 
+
 # =====================
 # START: Added in v1.05+ for Archive + Export + Search
 # =====================
-
-# Ensure an 'archived' column exists (0/1) even if the ORM model lacks it
 @app.on_event("startup")
 def _ensure_archived_column():
     try:
@@ -1169,6 +1227,7 @@ def _ensure_archived_column():
     except Exception as e:
         logger.warning("Could not ensure 'archived' column: %s", e)
 
+
 @app.get("/cases", response_class=HTMLResponse)
 def cases_list(
     request: Request,
@@ -1179,7 +1238,6 @@ def cases_list(
 ):
     qry = db.query(Case)
 
-    # Filter archived using a text where-clause (works even if ORM model lacks the column)
     if not show_archived:
         qry = qry.filter(text("(archived IS NULL OR archived = 0)"))
 
@@ -1208,6 +1266,7 @@ def cases_list(
         },
     )
 
+
 @app.post("/cases/archive")
 def archive_cases(
     request: Request,
@@ -1216,15 +1275,14 @@ def archive_cases(
     db: Session = Depends(get_db),
 ):
     if ids:
-        # Raw SQL update that doesn't require Case.archived attribute on the ORM model
         db.execute(
             text("UPDATE cases SET archived = 1 WHERE id IN :ids")
             .bindparams(bindparam("ids", expanding=True)),
             {"ids": ids},
         )
         db.commit()
-    # After archiving, force the list to hide archived items
     return RedirectResponse(url="/cases?show_archived=0&page=1", status_code=303)
+
 
 @app.post("/cases/export")
 def export_cases(
@@ -1236,7 +1294,6 @@ def export_cases(
 ):
     qry = db.query(Case)
 
-    # Mirror the list view’s archived filter via raw SQL text
     if not show_archived:
         qry = qry.filter(text("(archived IS NULL OR archived = 0)"))
 
@@ -1311,14 +1368,10 @@ def export_cases(
         headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
     )
 
-# =====================
-# END: Added in v1.05+
-# =====================
+
 # =====================
 # v1.07 Additions — Unarchive + AJAX endpoints
 # =====================
-
-# Ensure 'archived' column exists (already in v1.06, keep for safety)
 @app.on_event("startup")
 def _ensure_archived_column_v107():
     try:
@@ -1330,7 +1383,7 @@ def _ensure_archived_column_v107():
     except Exception as e:
         logger.warning("Could not ensure 'archived' column: %s", e)
 
-# --- Unarchive (form POST) ---
+
 @app.post("/cases/unarchive")
 def unarchive_cases(
     request: Request,
@@ -1345,10 +1398,9 @@ def unarchive_cases(
             {"ids": ids},
         )
         db.commit()
-    # After unarchiving, if user is showing archived, stay; else, reload hidden
     return RedirectResponse(url=f"/cases?show_archived={show_archived}&page=1", status_code=303)
 
-# --- Archive (AJAX) ---
+
 @app.post("/cases/archive_async")
 def archive_cases_async(
     ids: List[int] = Form(default=[]),
@@ -1364,7 +1416,7 @@ def archive_cases_async(
     db.commit()
     return {"ok": True, "updated": len(ids)}
 
-# --- Unarchive (AJAX) ---
+
 @app.post("/cases/unarchive_async")
 def unarchive_cases_async(
     ids: List[int] = Form(default=[]),
@@ -1379,9 +1431,9 @@ def unarchive_cases_async(
     )
     db.commit()
     return {"ok": True, "updated": len(ids)}
+
+
 # =====================
 # Manual Add Case (v1.08)
 # =====================
-
-
-
+# (placeholder for future additions)

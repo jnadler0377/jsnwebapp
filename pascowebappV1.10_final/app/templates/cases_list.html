@@ -1,0 +1,248 @@
+
+{% extends "base.html" %}
+{% block content %}
+<h2>Cases</h2>
+
+<form id="bulk-actions" method="post">
+  <div style="display:flex; gap: 0.5rem; align-items:center; flex-wrap: wrap; margin: 0.5rem 0;">
+    <input type="search" name="case" value="{{ search_query or '' }}" placeholder="Search case #">
+    <button type="submit" formaction="/cases" formmethod="get">Search</button>
+
+    <label style="margin-left:1rem;">
+      <input type="checkbox" id="show-archived-toggle" {% if show_archived %}checked{% endif %}
+             onclick="window.location.href='?page={{ pagination.page }}&show_archived='+(this.checked?1:0){% if search_query %}+'&case={{ search_query }}'{% endif %}">
+      Show archived
+    </label>
+
+    <button type="submit" id="btn-archive" formaction="/cases/archive" formmethod="post" style="font-size:0.6em; padding:0.5em 0.6em;">Archive Selected</button>
+    <button type="submit" id="btn-unarchive" formaction="/cases/unarchive" formmethod="post" style="font-size:0.6em; padding:0.5em 0.6em;">Unarchive Selected</button>
+    <button type="submit" id="btn-export" formaction="/cases/export" formmethod="post" style="font-size:0.6em; padding:0.5em 0.6em;">Export CSV</button>
+<a class="btn" href="/cases/new" style="font-size:0.6em; padding:0.5em 0.6em;">➕ Add Case</a>
+    <input type="hidden" name="show_archived" value="{{ 1 if show_archived else 0 }}">
+    <input type="hidden" name="page" value="{{ pagination.page }}">
+  </div>
+
+<style>
+  .pagination .btn { font-size: 0.7em !important; padding: 0.25em 0.5em !important; }
+  .pagination span { font-size: 0.7em !important; }
+  .table { font-size: 0.75em; }
+  .table tbody tr { cursor: pointer; }
+  .table tbody tr:focus { outline: 2px solid #007bff; }
+  .table th, .table td { padding: 0.5em; vertical-align: middle; }
+  .faded { opacity: 0.45; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:999px; background:#eef2ff; color:#3730a3; font-size:11px; }
+</style>
+
+{% if cases %}
+  <div id="toast" style="display:none; position:fixed; right:16px; bottom:16px; background:#111; color:#fff; padding:10px 14px; border-radius:10px;">Done.</div>
+  <table class="table">
+    <thead>
+      <tr>
+        <th><input type="checkbox" id="check-all"></th>
+        <th>Case #</th>
+        <th>Filed</th>
+        <th>Style</th>
+        <th>Address</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="case-tbody">
+      {% for c in cases %}
+      {# mark archived in DOM via data-archived attr for instant UI updates #}
+      <tr data-href="/cases/{{ c.id }}" data-id="{{ c.id }}" data-archived="{{ 1 if c.archived else 0 }}" tabindex="0" role="link" aria-label="Open case {{ c.case_number }}">
+        <td><input type="checkbox" name="ids" value="{{ c.id }}" onclick="event.stopPropagation()"></td>
+        <td>{{ c.case_number }}</td>
+        <td>{{ c.filing_datetime }}</td>
+        <td>{{ c.style }}</td>
+        <td>
+          {% if c.address_override %}{{ c.address_override }}{% else %}—{% endif %}
+        </td>
+        <td>
+          {% if c.archived %}<span class="pill">Archived</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</form>
+
+  <!-- Pagination -->
+  <nav class="pagination" aria-label="Pagination">
+    {% if pagination.page > 1 %}
+      <a class="btn" href="?page=1&show_archived={{ 1 if show_archived else 0 }}{% if search_query %}&case={{ search_query }}{% endif %}">« First</a>
+      <a class="btn" href="?page={{ pagination.page - 1 }}&show_archived={{ 1 if show_archived else 0 }}{% if search_query %}&case={{ search_query }}{% endif %}">‹ Prev</a>
+    {% else %}
+      <span class="btn disabled">« First</span>
+      <span class="btn disabled">‹ Prev</span>
+    {% endif %}
+    <span>Page {{ pagination.page }} of {{ pagination.pages }}</span>
+    {% if pagination.page < pagination.pages %}
+      <a class="btn" href="?page={{ pagination.page + 1 }}&show_archived={{ 1 if show_archived else 0 }}{% if search_query %}&case={{ search_query }}{% endif %}">Next ›</a>
+      <a class="btn" href="?page={{ pagination.pages }}&show_archived={{ 1 if show_archived else 0 }}{% if search_query %}&case={{ search_query }}{% endif %}">Last »</a>
+    {% else %}
+      <span class="btn disabled">Next ›</span>
+      <span class="btn disabled">Last »</span>
+    {% endif %}
+  </nav>
+
+<script>
+(function(){
+  function qs(sel, root){ return (root||document).querySelector(sel); }
+  function qsa(sel, root){ return Array.from((root||document).querySelectorAll(sel)); }
+  const tbody = qs('#case-tbody');
+  const checkAll = qs('#check-all');
+  const toast = qs('#toast');
+  function showToast(msg){
+    toast.textContent = msg || 'Done.';
+    toast.style.display = 'block';
+    setTimeout(()=> toast.style.display='none', 1600);
+  }
+  // Row navigation (ignore clicks on inputs/links)
+  if (tbody){
+    tbody.addEventListener('click', function(e){
+      const tr = e.target.closest('tr[data-href]');
+      if (tr && !(e.target.tagName === 'A' || e.target.closest('a') || e.target.type === 'checkbox')) {
+        window.location.href = tr.getAttribute('data-href');
+      }
+    });
+    tbody.addEventListener('keydown', function(e){
+      const tr = e.target.closest('tr[data-href]');
+      if (tr && (e.key === 'Enter' || e.key === ' ')) {
+        e.preventDefault();
+        window.location.href = tr.getAttribute('data-href');
+      }
+    });
+  }
+  // Select all
+  if (checkAll){
+    checkAll.addEventListener('change', function(){
+      qsa('input[name="ids"]').forEach(cb => cb.checked = checkAll.checked);
+    });
+  }
+
+  // Helpers
+  function selectedIds(){
+    return qsa('input[name="ids"]:checked').map(cb => parseInt(cb.value, 10)).filter(Boolean);
+  }
+  function hideTr(id){
+    const tr = qs('tr[data-id="'+id+'"]');
+    if (tr) tr.remove();
+  }
+  function markArchived(id, archived){
+    const tr = qs('tr[data-id="'+id+'"]');
+    if (!tr) return;
+    tr.dataset.archived = archived ? '1' : '0';
+    const pill = tr.querySelector('.pill');
+    if (archived){
+      tr.classList.add('faded');
+      if (!pill){
+        const td = tr.querySelector('td:last-child');
+        const span = document.createElement('span');
+        span.className = 'pill';
+        span.textContent = 'Archived';
+        td.appendChild(span);
+      }
+    } else {
+      tr.classList.remove('faded');
+      if (pill) pill.remove();
+    }
+  }
+
+  // AJAX endpoints
+  async function postJSON(url, payload){
+    const form = new FormData();
+    if (payload && payload.ids){
+      payload.ids.forEach(id => form.append('ids', id));
+    }
+    const res = await fetch(url, { method: 'POST', body: form });
+    if (!res.ok){ throw new Error('Request failed: ' + res.status); }
+    const ctype = res.headers.get('content-type') || '';
+    if (ctype.includes('application/json')) return res.json();
+    return {};
+  }
+
+  async function postExport(url, payload){
+    const form = new FormData();
+    if (payload && payload.ids){
+      payload.ids.forEach(id => form.append('ids', id));
+    }
+    // persist filters
+    const showArchived = {{ 1 if show_archived else 0 }};
+    const search = {{ search_query|tojson|safe }};
+    form.append('show_archived', showArchived);
+    form.append('case', search || '');
+
+    const res = await fetch(url, { method: 'POST', body: form });
+    if (!res.ok){ throw new Error('Export failed: ' + res.status); }
+    const blob = await res.blob();
+    const dispo = res.headers.get('Content-Disposition') || 'attachment; filename="cases_export.csv"';
+    const match = dispo.match(/filename="?([^"]+)"?/i);
+    const filename = match ? match[1] : 'cases_export.csv';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>{
+      URL.revokeObjectURL(a.href);
+      a.remove();
+    }, 0);
+  }
+
+  // Wire buttons to AJAX
+  const btnArchive = qs('#btn-archive');
+  const btnUnarchive = qs('#btn-unarchive');
+  const btnExport = qs('#btn-export');
+
+  if (btnArchive){
+    btnArchive.addEventListener('click', async function(e){
+      if (!e.shiftKey){ e.preventDefault(); } // allow normal POST if Shift is held
+      const ids = selectedIds();
+      if (ids.length === 0) return;
+      try{
+        await postJSON('/cases/archive_async', { ids });
+        // If not showing archived, remove rows. If showing, mark faded.
+        const showArchived = {{ 1 if show_archived else 0 }};
+        ids.forEach(id => showArchived ? markArchived(id, true) : hideTr(id));
+        showToast('Archived ' + ids.length + ' case(s).');
+      } catch(err){ alert(err.message); }
+    });
+  }
+
+  if (btnUnarchive){
+    btnUnarchive.addEventListener('click', async function(e){
+      if (!e.shiftKey){ e.preventDefault(); }
+      const ids = selectedIds();
+      if (ids.length === 0) return;
+      try{
+        await postJSON('/cases/unarchive_async', { ids });
+        const showArchived = {{ 1 if show_archived else 0 }};
+        ids.forEach(id => {
+          if (showArchived){
+            markArchived(id, false);
+          } else {
+            // if archived are hidden, unarchived items would be visible anyway
+          }
+        });
+        showToast('Unarchived ' + ids.length + ' case(s).');
+      } catch(err){ alert(err.message); }
+    });
+  }
+
+  if (btnExport){
+    btnExport.addEventListener('click', async function(e){
+      if (!e.shiftKey){ e.preventDefault(); }
+      const ids = selectedIds();
+      try{
+        await postExport('/cases/export', { ids });
+        showToast('Export started…');
+      } catch(err){ alert(err.message); }
+    });
+  }
+})();
+</script>
+
+{% else %}
+  <p>No cases imported yet. Go to <a href="/import">Update Case List</a>.</p>
+{% endif %}
+{% endblock %}

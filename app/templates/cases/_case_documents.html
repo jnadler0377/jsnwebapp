@@ -1,0 +1,14 @@
+<section class="documents-section">
+  <h3>Documents</h3>
+  <ul>
+    {% for d in case.dockets or [] %}
+      <li>
+        <a href="{{ d.file_url or '#' }}" target="_blank">
+          {{ d.description or d.file_name or 'Document' }}
+        </a>
+      </li>
+    {% else %}
+      <li><em>No documents uploaded.</em></li>
+    {% endfor %}
+  </ul>
+</section>

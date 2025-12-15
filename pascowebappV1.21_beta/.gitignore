@@ -1,0 +1,18 @@
+# Ignore archives and large binaries
+*.zip
+*.rar
+*.7z
+
+# Ignore local databases and logs
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+*.log
+
+# Python / venv stuff
+.env
+.venv/
+venv/
+ENV/
+env/

@@ -1,0 +1,28 @@
+{# Lien modal (used by liens JS in case_detail.html) #}
+<div id="lienModal" class="lien-modal">
+  <div class="lien-modal-content">
+    <div class="lien-modal-header">
+      <h4 id="lienModalTitle">Add / Edit Lien</h4>
+      <span id="lienModalClose" class="lien-close">&times;</span>
+    </div>
+
+    <form id="lienModalForm">
+      <input type="hidden" id="lienIndex">
+
+      <div class="form-row">
+        <label for="lienHolder">Lien Holder</label>
+        <input type="text" id="lienHolder" placeholder="Bank / HOA / Judgment Creditor">
+      </div>
+
+      <div class="form-row">
+        <label for="lienAmount">Amount</label>
+        <input type="text" id="lienAmount" placeholder="$25,000.00">
+      </div>
+
+      <div class="lien-modal-actions">
+        <button type="button" class="btn" id="lienModalCancel">Cancel</button>
+        <button type="submit" class="btn">Save Lien</button>
+      </div>
+    </form>
+  </div>
+</div>
