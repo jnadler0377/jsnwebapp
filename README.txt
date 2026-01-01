@@ -14,4 +14,3 @@ Pasco Foreclosure Manager — Quickstart
 
 
 python -m uvicorn app.main:app --reload --port 8000
-batchdata.io API Key: SJZDS94YHjR95liQxePQmiEN7cwo3rUpXFgQDt7K
